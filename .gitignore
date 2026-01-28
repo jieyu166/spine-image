@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# Model files (too large for GitHub)
+*.pth
+checkpoint_*.pth
+
+# Training data and results
+endplate_training_data/
+inference_results/
+*.png
+!README*.png
+
+# DICOM and medical images
+*.dcm
+Images/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude
+.claude/
+
+# Temporary
+*.tmp
+*.temp
+*.log
+
+# Other files folder (keep structure but not contents)
+# Other files/

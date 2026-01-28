@@ -1,0 +1,126 @@
+{
+  "metadata": {
+    "patient_id": "P001",
+    "study_id": "S20240115001",
+    "study_date": "2024-01-15",
+    "spine_type": "L",
+    "image_type": "flexion",
+    "image_path": "images/P001_flexion.jpg",
+    "image_dimensions": {
+      "width": 1024,
+      "height": 768
+    },
+    "annotator": {
+      "name": "Dr. Smith",
+      "id": "DOC001",
+      "specialty": "Radiology",
+      "experience_years": 15
+    },
+    "annotation_date": "2024-01-15T10:30:00Z",
+    "annotation_version": "1.0",
+    "quality_assessment": {
+      "image_quality": 0.95,
+      "contrast": 0.90,
+      "noise_level": 0.05,
+      "artifacts": false,
+      "positioning": "adequate"
+    },
+    "clinical_info": {
+      "age": 45,
+      "gender": "M",
+      "symptoms": ["lower_back_pain"],
+      "previous_surgery": false,
+      "pathology_notes": "輕微椎間盤退化"
+    }
+  },
+  "measurements": {
+    "vertebrae": [
+      {
+        "level": "L5/S1",
+        "angle": 12.5,
+        "confidence": 0.98,
+        "measurement_method": "manual",
+        "lowerEndplate": [
+          {"x": 150, "y": 180, "confidence": 0.99},
+          {"x": 200, "y": 185, "confidence": 0.97}
+        ],
+        "upperEndplate": [
+          {"x": 155, "y": 220, "confidence": 0.98},
+          {"x": 195, "y": 225, "confidence": 0.96}
+        ],
+        "landmarks": [
+          {"x": 175, "y": 202.5, "type": "center", "confidence": 0.98},
+          {"x": 165, "y": 190, "type": "anterior", "confidence": 0.95},
+          {"x": 185, "y": 215, "type": "posterior", "confidence": 0.97}
+        ],
+        "measurement_notes": "終板邊界清晰，角度測量準確",
+        "pathology_notes": "無明顯異常"
+      },
+      {
+        "level": "L4/L5",
+        "angle": 15.3,
+        "confidence": 0.95,
+        "measurement_method": "manual",
+        "lowerEndplate": [
+          {"x": 120, "y": 200, "confidence": 0.96},
+          {"x": 180, "y": 205, "confidence": 0.94}
+        ],
+        "upperEndplate": [
+          {"x": 125, "y": 250, "confidence": 0.95},
+          {"x": 175, "y": 255, "confidence": 0.93}
+        ],
+        "landmarks": [
+          {"x": 150, "y": 225, "type": "center", "confidence": 0.95},
+          {"x": 140, "y": 210, "type": "anterior", "confidence": 0.92},
+          {"x": 160, "y": 240, "type": "posterior", "confidence": 0.94}
+        ],
+        "measurement_notes": "椎間盤輕微突出，終板邊界稍模糊",
+        "pathology_notes": "椎間盤輕微突出，建議追蹤"
+      },
+      {
+        "level": "L3/L4",
+        "angle": 18.7,
+        "confidence": 0.92,
+        "measurement_method": "manual",
+        "lowerEndplate": [
+          {"x": 100, "y": 220, "confidence": 0.93},
+          {"x": 160, "y": 225, "confidence": 0.91}
+        ],
+        "upperEndplate": [
+          {"x": 105, "y": 270, "confidence": 0.92},
+          {"x": 155, "y": 275, "confidence": 0.90}
+        ],
+        "landmarks": [
+          {"x": 130, "y": 247.5, "type": "center", "confidence": 0.92},
+          {"x": 120, "y": 230, "type": "anterior", "confidence": 0.89},
+          {"x": 140, "y": 260, "type": "posterior", "confidence": 0.91}
+        ],
+        "measurement_notes": "角度較大，需注意穩定性",
+        "pathology_notes": "椎間盤輕微退化"
+      }
+    ],
+    "overall_assessment": {
+      "total_vertebrae_measured": 3,
+      "average_angle": 15.5,
+      "angle_range": "12.5-18.7",
+      "stability_assessment": "stable",
+      "clinical_significance": "mild_degeneration",
+      "recommendations": "定期追蹤，建議物理治療"
+    }
+  },
+  "quality_control": {
+    "inter_annotator_agreement": 0.92,
+    "measurement_consistency": 0.95,
+    "landmark_accuracy": 0.94,
+    "reviewer_approval": true,
+    "reviewer_name": "Dr. Johnson",
+    "review_date": "2024-01-15T14:30:00Z"
+  },
+  "technical_info": {
+    "annotation_tool": "Spine Measurement Tool v3.0",
+    "coordinate_system": "pixel_coordinates",
+    "angle_calculation_method": "endplate_tangent",
+    "measurement_precision": 0.1,
+    "calibration_factor": 1.0
+  }
+}

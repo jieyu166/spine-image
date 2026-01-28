@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spinal Vertebra Angle Measurement</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .image-container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .image-wrapper {
+            position: relative;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            cursor: crosshair;
+            max-width: 600px;
+            height: auto;
+        }
+        input[type="file"] {
+            padding: 5px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .info {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .measurements {
+            margin-top: 20px;
+        }
+        .measurement-item {
+            padding: 8px;
+            margin: 5px 0;
+            background-color: #e9ecef;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .mode-indicator {
+            padding: 5px 10px;
+            background-color: #28a745;
+            color: white;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .instructions {
+            margin-top: 10px;
+            padding: 15px;
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .label-input {
+            position: absolute;
+            padding: 2px 5px;
+            font-size: 14px;
+            background-color: white;
+            border: 1px solid #333;
+            border-radius: 3px;
+            z-index: 1000;
+        }
+        .vertebra-label {
+            cursor: pointer;
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 4px 8px;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 16px;
+            min-width: 60px;
+            text-align: center;
+        }
+        .vertebra-label:hover {
+            background-color: rgba(255, 255, 0, 0.9);
+        }
+        .toggle-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 5px 0;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 30px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 30px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #007bff;
+        }
+        input:checked + .slider:before {
+            transform: translateX(30px);
+        }
+        .toggle-label {
+            font-weight: bold;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>脊椎角度測量工具 - Spinal Angle Measurement Tool</h1>
+        
+        <div class="instructions">
+            <strong>使用說明 Instructions:</strong>
+            <ol>
+                <li>點擊「螢幕截圖」可直接擷取螢幕內容，或按 Ctrl+V 貼上已複製的圖片</li>
+                <li>選擇要貼到哪張圖片位置（屈曲位或伸展位）</li>
+                <li>依序點擊每個椎體的下終板（2點）和下一椎體上終板（2點），系統會自動計算角度和位移</li>
+                <li>雙擊標籤可編輯椎間隙名稱（如 L3-L4, L4-L5 等）</li>
+                <li>可使用邊緣檢測功能幫助識別椎體邊界</li>
+            </ol>
+        </div>
+
+        <div class="controls">
+            <button id="screenCaptureBtn" style="background-color: #dc3545;">螢幕截圖 Screen Capture</button>
+            <button id="pasteBtn" style="background-color: #28a745;">貼上圖片 Paste Image (Ctrl+V)</button>
+            
+            <div class="toggle-group">
+                <span class="toggle-label">圖片目標:</span>
+                <span class="toggle-label">圖片1</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="targetToggle">
+                    <span class="slider"></span>
+                </label>
+                <span class="toggle-label">圖片2</span>
+            </div>
+            
+            <button id="edgeBtn" style="background-color: #6c757d;">邊緣檢測 Edge Detection</button>
+            <input type="range" id="edgeThreshold" min="10" max="100" value="30" style="width: 150px;">
+            <span id="thresholdValue">30</span>
+            <button id="clearBtn">清除所有標記 Clear All</button>
+            <button id="undoBtn">撤銷 Undo</button>
+        </div>
+
+        <div class="controls">
+            <div class="toggle-group">
+                <span class="toggle-label">脊椎類型:</span>
+                <span class="toggle-label">L-spine</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="spineTypeToggle">
+                    <span class="slider"></span>
+                </label>
+                <span class="toggle-label">C-spine</span>
+            </div>
+            
+            <button id="exportBtn">匯出數據 Export Data</button>
+            <button id="copyBtn" style="background-color: #17a2b8;">複製結果到剪貼簿 Copy Results</button>
+        </div>
+
+        <div class="image-container">
+            <div class="image-wrapper">
+                <canvas id="canvas1"></canvas>
+                <div style="text-align: center; margin-top: 5px;">圖片1 (屈曲 Flexion)</div>
+            </div>
+            <div class="image-wrapper">
+                <canvas id="canvas2"></canvas>
+                <div style="text-align: center; margin-top: 5px;">圖片2 (伸展 Extension)</div>
+            </div>
+        </div>
+
+        <div class="measurements" id="measurements">
+            <h3>測量結果 Measurements:</h3>
+            <div id="measurementsList"></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局變數
+        let spineType = 'L'; // 'L' for L-spine, 'C' for C-spine
+        let targetImage = 1; // 1 or 2
+        let points1 = [];
+        let points2 = [];
+        let vertebrae1 = [];
+        let vertebrae2 = [];
+        let currentVertebraPoints1 = [];
+        let currentVertebraPoints2 = [];
+        let images = { img1: null, img2: null };
+        let edgeImages = { img1: null, img2: null };
+        let showEdge = false;
+        let editingLabel = null;
+
+        // 自動生成標籤函數
+        function generateVertebralLabel(vertebraeArray, spineType) {
+            if (spineType === 'L') {
+                // L-spine: 由下而上，L5/S1, L4/L5, L3/L4...
+                const lspineLabels = ['L5/S1', 'L4/L5', 'L3/L4', 'L2/L3', 'L1/L2', 'T12/L1'];
+                return lspineLabels[vertebraeArray.length] || `L${Math.max(1, 6-vertebraeArray.length)}/L${Math.max(2, 7-vertebraeArray.length)}`;
+            } else {
+                // C-spine: 由上而下，C2/C3, C3/C4, C4/C5...
+                const level = vertebraeArray.length + 2;
+                return `C${level}/C${level + 1}`;
+            }
+        }
+
+        // Canvas setup
+        const canvas1 = document.getElementById('canvas1');
+        const canvas2 = document.getElementById('canvas2');
+        const ctx1 = canvas1.getContext('2d');
+        const ctx2 = canvas2.getContext('2d');
+
+        // Function definitions
+        function handlePaste(e) {
+            e.preventDefault();
+            const items = e.clipboardData.items;
+            
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    loadImageFromBlob(blob);
+                    return;
+                }
+            }
+            alert('剪貼簿中沒有圖片！');
+        }
+
+        function loadImageFromBlob(blob) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    if (targetImage === 1) {
+                        images.img1 = img;
+                        canvas1.width = img.width;
+                        canvas1.height = img.height;
+                        if (showEdge) {
+                            applyEdgeDetection();
+                        }
+                        redraw(1);
+                    } else {
+                        images.img2 = img;
+                        canvas2.width = img.width;
+                        canvas2.height = img.height;
+                        if (showEdge) {
+                            applyEdgeDetection();
+                        }
+                        redraw(2);
+                    }
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(blob);
+        }
+
+        function handleCanvasClick(event, canvasNum) {
+            const canvas = canvasNum === 1 ? canvas1 : canvas2;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = (event.clientX - rect.left) * scaleX;
+            const y = (event.clientY - rect.top) * scaleY;
+
+            handleVertebraMode(x, y, canvasNum);
+
+            redraw(canvasNum);
+            updateMeasurements();
+        }
+
+        function handleLabelEdit(event, canvasNum) {
+            const canvas = canvasNum === 1 ? canvas1 : canvas2;
+            const vertebrae = canvasNum === 1 ? vertebrae1 : vertebrae2;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = (event.clientX - rect.left) * scaleX;
+            const y = (event.clientY - rect.top) * scaleY;
+            
+            // 找到點擊位置附近的標籤
+            for (let i = 0; i < vertebrae.length; i++) {
+                const vertebra = vertebrae[i];
+                const labelX = (vertebra.lowerEndplate[0].x + vertebra.upperEndplate[1].x) / 2;
+                const labelY = (vertebra.lowerEndplate[0].y + vertebra.upperEndplate[0].y) / 2;
+                
+                // 計算標籤尺寸（更大的點擊區域）
+                const ctx = canvasNum === 1 ? ctx1 : ctx2;
+                ctx.font = 'bold 18px Arial';
+                const textWidth = ctx.measureText(vertebra.label).width;
+                const padding = 8;
+                const clickAreaWidth = textWidth + padding * 2;
+                const clickAreaHeight = 20 + padding;
+                
+                // 檢查是否點擊在標籤區域內
+                if (Math.abs(x - labelX) < clickAreaWidth/2 && Math.abs(y - labelY) < clickAreaHeight/2) {
+                    createLabelInput(vertebra, i, canvasNum, event.clientX, event.clientY);
+                    break;
+                }
+            }
+        }
+        
+        function createLabelInput(vertebra, index, canvasNum, clientX, clientY) {
+            // 如果已有編輯框，先移除
+            const existingInput = document.querySelector('.label-input');
+            if (existingInput) {
+                existingInput.remove();
+            }
+            
+            // 創建輸入框
+            const input = document.createElement('input');
+            input.className = 'label-input';
+            input.type = 'text';
+            input.value = vertebra.label;
+            input.style.left = clientX + 'px';
+            input.style.top = clientY + 'px';
+            
+            // 添加事件監聽
+            input.addEventListener('blur', () => {
+                saveLabel(input.value, index, canvasNum);
+                input.remove();
+            });
+            
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    saveLabel(input.value, index, canvasNum);
+                    input.remove();
+                } else if (e.key === 'Escape') {
+                    input.remove();
+                }
+            });
+            
+            document.body.appendChild(input);
+            input.focus();
+            input.select();
+        }
+        
+        function saveLabel(newLabel, index, canvasNum) {
+            if (canvasNum === 1) {
+                vertebrae1[index].label = newLabel;
+            } else {
+                vertebrae2[index].label = newLabel;
+            }
+            redraw(canvasNum);
+            updateMeasurements();
+        }
+
+        function handleVertebraMode(x, y, canvasNum) {
+            const point = { x, y };
+            
+            if (canvasNum === 1) {
+                currentVertebraPoints1.push(point);
+                points1.push(point);
+                
+                if (currentVertebraPoints1.length === 4) {
+                    // 完成一個椎間隙的標記（上椎體下終板 + 下椎體上終板）
+                    vertebrae1.push({
+                        lowerEndplate: [currentVertebraPoints1[0], currentVertebraPoints1[1]],
+                        upperEndplate: [currentVertebraPoints1[2], currentVertebraPoints1[3]],
+                        label: generateVertebralLabel(vertebrae1, spineType)
+                    });
+                    currentVertebraPoints1 = [];
+                }
+            } else {
+                currentVertebraPoints2.push(point);
+                points2.push(point);
+                
+                if (currentVertebraPoints2.length === 4) {
+                    vertebrae2.push({
+                        lowerEndplate: [currentVertebraPoints2[0], currentVertebraPoints2[1]],
+                        upperEndplate: [currentVertebraPoints2[2], currentVertebraPoints2[3]],
+                        label: generateVertebralLabel(vertebrae2, spineType)
+                    });
+                    currentVertebraPoints2 = [];
+                }
+            }
+        }
+
+        function redraw(canvasNum) {
+            const canvas = canvasNum === 1 ? canvas1 : canvas2;
+            const ctx = canvasNum === 1 ? ctx1 : ctx2;
+            const img = canvasNum === 1 ? images.img1 : images.img2;
+            const edgeImg = canvasNum === 1 ? edgeImages.img1 : edgeImages.img2;
+            const vertebrae = canvasNum === 1 ? vertebrae1 : vertebrae2;
+            const currentPoints = canvasNum === 1 ? currentVertebraPoints1 : currentVertebraPoints2;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (img) {
+                // 繪製原始圖像或邊緣檢測圖像
+                if (showEdge && edgeImg && edgeImg.complete) {
+                    ctx.drawImage(edgeImg, 0, 0);
+                } else {
+                    ctx.drawImage(img, 0, 0);
+                }
+            }
+
+            // 繪製椎間隙標記
+            vertebrae.forEach((vertebra, index) => {
+                // 繪製上椎體下終板（紅線）
+                drawLine(ctx, vertebra.lowerEndplate[0], vertebra.lowerEndplate[1], '#ff0000', 2);
+                // 繪製下椎體上終板（藍線）
+                drawLine(ctx, vertebra.upperEndplate[0], vertebra.upperEndplate[1], '#0000ff', 2);
+                
+                // 標記椎間隙編號（可編輯）
+                const centerX = (vertebra.lowerEndplate[0].x + vertebra.upperEndplate[1].x) / 2;
+                const centerY = (vertebra.lowerEndplate[0].y + vertebra.upperEndplate[0].y) / 2;
+                
+                // 繪製標籤背景
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                ctx.font = 'bold 18px Arial';
+                const textWidth = ctx.measureText(vertebra.label).width;
+                const textHeight = 20;
+                const padding = 8;
+                ctx.fillRect(centerX - textWidth/2 - padding, centerY - textHeight/2 - padding/2, 
+                           textWidth + padding*2, textHeight + padding);
+                
+                // 繪製邊框
+                ctx.strokeStyle = '#333333';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(centerX - textWidth/2 - padding, centerY - textHeight/2 - padding/2, 
+                             textWidth + padding*2, textHeight + padding);
+                
+                // 繪製標籤文字
+                ctx.fillStyle = '#000000';
+                ctx.font = 'bold 18px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(vertebra.label, centerX, centerY);
+                
+                // 重置文字對齊
+                ctx.textAlign = 'start';
+                ctx.textBaseline = 'alphabetic';
+            });
+
+            // 繪製當前標記的點
+            currentPoints.forEach((point, index) => {
+                drawPoint(ctx, point, index < 2 ? '#ff0000' : '#0000ff', 5);
+            });
+        }
+
+        function drawPoint(ctx, point, color, size) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, size, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        function drawLine(ctx, point1, point2, color, width) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            ctx.moveTo(point1.x, point1.y);
+            ctx.lineTo(point2.x, point2.y);
+            ctx.stroke();
+        }
+
+        function calculateAngle(p1, p2, p3, p4) {
+            // 計算兩條線的角度
+            const angle1 = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+            const angle2 = Math.atan2(p4.y - p3.y, p4.x - p3.x);
+            let diff = Math.abs(angle1 - angle2) * 180 / Math.PI;
+            if (diff > 180) diff = 360 - diff;
+            return diff;
+        }
+
+        function calculateIntervertebralAngle(vertebra) {
+            // 計算上椎體下終板和下椎體上終板的角度
+            return calculateAngle(
+                vertebra.lowerEndplate[0],
+                vertebra.lowerEndplate[1],
+                vertebra.upperEndplate[0],
+                vertebra.upperEndplate[1]
+            );
+        }
+
+        function updateMeasurements() {
+            const measurementsList = document.getElementById('measurementsList');
+            measurementsList.innerHTML = '';
+
+            // 計算椎間角度和位移
+            if (vertebrae1.length > 0) {
+                const div1 = document.createElement('div');
+                div1.innerHTML = '<strong>圖片1 (屈曲位) 測量結果:</strong>';
+                measurementsList.appendChild(div1);
+
+                vertebrae1.forEach((vertebra, i) => {
+                    const angle = calculateIntervertebralAngle(vertebra);
+                    const item = document.createElement('div');
+                    item.className = 'measurement-item';
+                    item.innerHTML = `${vertebra.label}: 角度 ${angle.toFixed(1)}°`;
+                    measurementsList.appendChild(item);
+                });
+            }
+
+            if (vertebrae2.length > 0) {
+                const div2 = document.createElement('div');
+                div2.innerHTML = '<br><strong>圖片2 (伸展位) 測量結果:</strong>';
+                measurementsList.appendChild(div2);
+
+                vertebrae2.forEach((vertebra, i) => {
+                    const angle = calculateIntervertebralAngle(vertebra);
+                    const item = document.createElement('div');
+                    item.className = 'measurement-item';
+                    item.innerHTML = `${vertebra.label}: 角度 ${angle.toFixed(1)}°`;
+                    measurementsList.appendChild(item);
+                });
+            }
+
+            // 比較兩張圖片的變化
+            if (vertebrae1.length > 0 && vertebrae2.length > 0) {
+                const div3 = document.createElement('div');
+                div3.innerHTML = '<br><strong>屈伸變化分析 (伸展位 - 屈曲位):</strong>';
+                measurementsList.appendChild(div3);
+
+                const minLength = Math.min(vertebrae1.length, vertebrae2.length);
+                for (let i = 0; i < minLength; i++) {
+                    const angle1 = calculateIntervertebralAngle(vertebrae1[i]);
+                    const angle2 = calculateIntervertebralAngle(vertebrae2[i]);
+                    
+                    const angleDiff = angle2 - angle1;
+                    
+                    const item = document.createElement('div');
+                    item.className = 'measurement-item';
+                    
+                    let stability = '';
+                    if (angleDiff > 0.5) { // 假設角度變化超過0.5度為不穩定
+                        stability = '可能不穩定';
+                    } else if (angleDiff > 0.1) { // 假設角度變化超過0.1度為警告
+                        stability = '警告';
+                    } else {
+                        stability = '穩定';
+                    }
+                    
+                    item.innerHTML = `
+                        ${vertebrae1[i].label}: 
+                        角度變化 ${angleDiff > 0 ? '+' : ''}${angleDiff.toFixed(1)}°
+                        <span style="color: ${stability === '警告' ? '#ffc107' : stability === '可能不穩定' ? '#ff9800' : '#28a745'}; font-weight: bold;"> [${stability}]</span>
+                    `;
+                    measurementsList.appendChild(item);
+                }
+                
+                // 添加整體評估
+                const summaryDiv = document.createElement('div');
+                summaryDiv.innerHTML = '<br><strong>整體穩定性評估:</strong>';
+                measurementsList.appendChild(summaryDiv);
+                
+                let unstableCount = 0;
+                let warningCount = 0;
+                
+                for (let i = 0; i < minLength; i++) {
+                    const angle1 = calculateIntervertebralAngle(vertebrae1[i]);
+                    const angle2 = calculateIntervertebralAngle(vertebrae2[i]);
+                    const angleDiff = angle2 - angle1;
+                    
+                    if (angleDiff > 0.5) unstableCount++;
+                    if (angleDiff > 0.1) warningCount++;
+                }
+                
+                const summaryItem = document.createElement('div');
+                summaryItem.className = 'measurement-item';
+                
+                let overallAssessment = '';
+                if (unstableCount > 0) {
+                    overallAssessment = `⚠️ 發現 ${unstableCount} 處可能不穩定節段，建議追蹤觀察`;
+                } else if (warningCount > 0) {
+                    overallAssessment = `⚠️ 發現 ${warningCount} 處警告節段，建議密切追蹤`;
+                } else {
+                    overallAssessment = '✅ 所有測量節段均顯示穩定';
+                }
+                
+                summaryItem.innerHTML = overallAssessment;
+                measurementsList.appendChild(summaryItem);
+            }
+        }
+
+        function clearAll() {
+            if (confirm('確定要清除所有標記嗎？')) {
+                points1 = [];
+                points2 = [];
+                vertebrae1 = [];
+                vertebrae2 = [];
+                currentVertebraPoints1 = [];
+                currentVertebraPoints2 = [];
+                redraw(1);
+                redraw(2);
+                updateMeasurements();
+            }
+        }
+
+        function undo() {
+            if (currentVertebraPoints1.length > 0) {
+                currentVertebraPoints1.pop();
+                points1.pop();
+            } else if (vertebrae1.length > 0) {
+                vertebrae1.pop();
+            }
+            
+            if (currentVertebraPoints2.length > 0) {
+                currentVertebraPoints2.pop();
+                points2.pop();
+            } else if (vertebrae2.length > 0) {
+                vertebrae2.pop();
+            }
+            
+            redraw(1);
+            redraw(2);
+            updateMeasurements();
+        }
+
+        function toggleEdgeDetection() {
+            showEdge = !showEdge;
+            const btn = document.getElementById('edgeBtn');
+            btn.style.backgroundColor = showEdge ? '#007bff' : '#6c757d';
+            
+            if (showEdge) {
+                applyEdgeDetection();
+            }
+            redraw(1);
+            redraw(2);
+        }
+
+        function applyEdgeDetection() {
+            const threshold = parseInt(document.getElementById('edgeThreshold').value);
+            
+            if (images.img1) {
+                const edgeCanvas = detectEdges(images.img1, threshold);
+                edgeCanvas.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const img = new Image();
+                    img.onload = function() {
+                        edgeImages.img1 = img;
+                        redraw(1);
+                        URL.revokeObjectURL(url);
+                    };
+                    img.src = url;
+                });
+            }
+            if (images.img2) {
+                const edgeCanvas = detectEdges(images.img2, threshold);
+                edgeCanvas.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const img = new Image();
+                    img.onload = function() {
+                        edgeImages.img2 = img;
+                        redraw(2);
+                        URL.revokeObjectURL(url);
+                    };
+                    img.src = url;
+                });
+            }
+        }
+
+        function detectEdges(img, threshold) {
+            // 創建臨時canvas進行邊緣檢測
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = img.width;
+            tempCanvas.height = img.height;
+            
+            // 繪製原始圖像
+            tempCtx.drawImage(img, 0, 0);
+            
+            // 獲取圖像數據
+            const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const data = imageData.data;
+            
+            // 轉換為灰階
+            const grayData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
+            for (let i = 0; i < data.length; i += 4) {
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                grayData[i / 4] = gray;
+            }
+            
+            // Sobel算子
+            const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+            const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+            
+            // 邊緣檢測
+            const edgeData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
+            
+            for (let y = 1; y < tempCanvas.height - 1; y++) {
+                for (let x = 1; x < tempCanvas.width - 1; x++) {
+                    let gx = 0, gy = 0;
+                    
+                    // 應用Sobel算子
+                    for (let ky = -1; ky <= 1; ky++) {
+                        for (let kx = -1; kx <= 1; kx++) {
+                            const idx = (y + ky) * tempCanvas.width + (x + kx);
+                            const gray = grayData[idx];
+                            const sobelIdx = (ky + 1) * 3 + (kx + 1);
+                            gx += gray * sobelX[sobelIdx];
+                            gy += gray * sobelY[sobelIdx];
+                        }
+                    }
+                    
+                    const magnitude = Math.sqrt(gx * gx + gy * gy);
+                    const idx = y * tempCanvas.width + x;
+                    edgeData[idx] = magnitude > threshold ? 255 : 0;
+                }
+            }
+            
+            // 創建邊緣檢測結果圖像（綠色邊緣，半透明原圖）
+            const resultCanvas = document.createElement('canvas');
+            const resultCtx = resultCanvas.getContext('2d');
+            resultCanvas.width = tempCanvas.width;
+            resultCanvas.height = tempCanvas.height;
+            
+            // 先繪製半透明的原始圖像
+            resultCtx.globalAlpha = 0.6;
+            resultCtx.drawImage(img, 0, 0);
+            resultCtx.globalAlpha = 1.0;
+            
+            // 創建綠色邊緣圖層
+            const resultImageData = resultCtx.getImageData(0, 0, resultCanvas.width, resultCanvas.height);
+            const resultData = resultImageData.data;
+            
+            for (let i = 0; i < edgeData.length; i++) {
+                if (edgeData[i] > 0) {
+                    const pixelIndex = i * 4;
+                    // 設置為綠色邊緣
+                    resultData[pixelIndex] = 0;     // R
+                    resultData[pixelIndex + 1] = 255; // G
+                    resultData[pixelIndex + 2] = 0;   // B
+                    resultData[pixelIndex + 3] = 255; // A
+                }
+            }
+            
+            resultCtx.putImageData(resultImageData, 0, 0);
+            
+            return resultCanvas;
+        }
+
+        // 事件監聽器
+        document.addEventListener('paste', handlePaste);
+        canvas1.addEventListener('click', (e) => handleCanvasClick(e, 1));
+        canvas2.addEventListener('click', (e) => handleCanvasClick(e, 2));
+        canvas1.addEventListener('dblclick', (e) => handleLabelEdit(e, 1));
+        canvas2.addEventListener('dblclick', (e) => handleLabelEdit(e, 2));
+        
+        // Toggle開關事件監聽器
+        document.getElementById('targetToggle').addEventListener('change', (e) => {
+            targetImage = e.target.checked ? 2 : 1;
+            console.log('目標圖片切換至:', targetImage === 1 ? '圖片1' : '圖片2');
+        });
+        
+        document.getElementById('spineTypeToggle').addEventListener('change', (e) => {
+            spineType = e.target.checked ? 'C' : 'L';
+            console.log('脊椎類型切換至:', spineType === 'L' ? 'L-spine' : 'C-spine');
+            
+            // 更新現有標籤
+            vertebrae1.forEach((vertebra, index) => {
+                vertebra.label = generateVertebralLabel(vertebrae1.slice(0, index), spineType);
+            });
+            vertebrae2.forEach((vertebra, index) => {
+                vertebra.label = generateVertebralLabel(vertebrae2.slice(0, index), spineType);
+            });
+            
+            redraw(1);
+            redraw(2);
+            updateMeasurements();
+        });
+        
+        document.getElementById('screenCaptureBtn').addEventListener('click', async () => {
+            try {
+                // 使用 Screen Capture API
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { mediaSource: 'screen' }
+                });
+                
+                const video = document.createElement('video');
+                video.srcObject = stream;
+                video.play();
+                
+                video.addEventListener('loadedmetadata', () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    
+                    ctx.drawImage(video, 0, 0);
+                    
+                    // 停止串流
+                    stream.getTracks().forEach(track => track.stop());
+                    
+                    // 轉換為 blob 並載入
+                    canvas.toBlob(blob => {
+                        loadImageFromBlob(blob);
+                    });
+                });
+            } catch (err) {
+                console.error('螢幕截圖失敗:', err);
+                alert('螢幕截圖功能需要瀏覽器支援。請使用系統截圖工具（如 Windows + Shift + S）截圖，然後按 Ctrl+V 貼上');
+            }
+        });
+        
+        document.getElementById('pasteBtn').addEventListener('click', () => {
+            // 觸發貼上事件
+            navigator.clipboard.read().then(data => {
+                for (let i = 0; i < data.length; i++) {
+                    if (data[i].types.includes('image/png') || data[i].types.includes('image/jpeg')) {
+                        data[i].getType('image/png').then(blob => {
+                            loadImageFromBlob(blob);
+                        });
+                    }
+                }
+            }).catch(() => {
+                alert('請先複製圖片到剪貼簿，然後按 Ctrl+V 貼上');
+            });
+        });
+        
+        document.getElementById('edgeBtn').addEventListener('click', toggleEdgeDetection);
+        document.getElementById('edgeThreshold').addEventListener('input', (e) => {
+            document.getElementById('thresholdValue').textContent = e.target.value;
+            if (showEdge) {
+                applyEdgeDetection();
+            }
+        });
+        
+        document.getElementById('clearBtn').addEventListener('click', clearAll);
+        document.getElementById('undoBtn').addEventListener('click', undo);
+        
+        document.getElementById('exportBtn').addEventListener('click', () => {
+            // 生成完整的 JSON 格式數據
+            const image1Data = {
+                measurements: vertebrae1.map(v => ({
+                    level: v.label,
+                    angle: calculateIntervertebralAngle(v),
+                    lowerEndplate: v.lowerEndplate,
+                    upperEndplate: v.upperEndplate
+                }))
+            };
+            
+            const image2Data = {
+                measurements: vertebrae2.map(v => ({
+                    level: v.label,
+                    angle: calculateIntervertebralAngle(v),
+                    lowerEndplate: v.lowerEndplate,
+                    upperEndplate: v.upperEndplate
+                }))
+            };
+            
+            const comparison = [];
+            const minLength = Math.min(vertebrae1.length, vertebrae2.length);
+            for (let i = 0; i < minLength; i++) {
+                const flexionAngle = calculateIntervertebralAngle(vertebrae1[i]);
+                const extensionAngle = calculateIntervertebralAngle(vertebrae2[i]);
+                
+                comparison.push({
+                    level: vertebrae1[i].label,
+                    flexionAngle: flexionAngle,
+                    extensionAngle: extensionAngle,
+                    angleDifference: extensionAngle - flexionAngle
+                });
+            }
+            
+            const data = {
+                image1: image1Data,
+                image2: image2Data,
+                comparison: comparison,
+                timestamp: new Date().toISOString(),
+                exportTime: new Date().toLocaleString('zh-TW')
+            };
+            
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'spinal-measurements.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+        
+        document.getElementById('copyBtn').addEventListener('click', () => {
+            // 生成規格書要求的純文字報告格式
+            let report = '脊椎角度測量報告\n================\n\n';
+            
+            if (vertebrae1.length > 0) {
+                report += '【圖片1 - 屈曲位】\n';
+                vertebrae1.forEach(vertebra => {
+                    const angle = calculateIntervertebralAngle(vertebra);
+                    report += `${vertebra.label}: 角度 ${angle.toFixed(1)}°\n`;
+                });
+                report += '\n';
+            }
+            
+            if (vertebrae2.length > 0) {
+                report += '【圖片2 - 伸展位】\n';
+                vertebrae2.forEach(vertebra => {
+                    const angle = calculateIntervertebralAngle(vertebra);
+                    report += `${vertebra.label}: 角度 ${angle.toFixed(1)}°\n`;
+                });
+                report += '\n';
+            }
+            
+            if (vertebrae1.length > 0 && vertebrae2.length > 0) {
+                report += '【屈伸變化分析】\n';
+                const minLength = Math.min(vertebrae1.length, vertebrae2.length);
+                
+                let unstableCount = 0;
+                let warningCount = 0;
+                
+                for (let i = 0; i < minLength; i++) {
+                    const angle1 = calculateIntervertebralAngle(vertebrae1[i]);
+                    const angle2 = calculateIntervertebralAngle(vertebrae2[i]);
+                    const angleDiff = angle2 - angle1;
+                    
+                    if (angleDiff > 0.5) unstableCount++;
+                    if (angleDiff > 0.1) warningCount++;
+                    
+                    report += `${vertebrae1[i].label}:\n`;
+                    report += `  角度變化: ${angleDiff > 0 ? '+' : ''}${angleDiff.toFixed(1)}°\n`;
+                    report += `  穩定性評估: ${angleDiff > 0.5 ? '可能不穩定' : angleDiff > 0.1 ? '警告' : '穩定'}\n`;
+                    
+                    // 穩定性警告
+                    if (angleDiff > 0.5) {
+                        report += `  ⚠️ 注意：可能不穩定，建議密切追蹤\n`;
+                    } else if (angleDiff > 0.1) {
+                        report += `  ⚠️ 注意：警告，建議密切追蹤\n`;
+                    }
+                    report += '\n';
+                }
+                
+                // 整體評估
+                report += '【整體穩定性評估】\n';
+                if (unstableCount > 0) {
+                    report += `⚠️ 發現 ${unstableCount} 處可能不穩定節段，建議追蹤觀察\n`;
+                } else if (warningCount > 0) {
+                    report += `⚠️ 發現 ${warningCount} 處警告節段，建議密切追蹤\n`;
+                } else {
+                    report += '✅ 所有測量節段均顯示穩定\n';
+                }
+                report += '\n';
+            }
+            
+            report += '================\n';
+            report += `報告時間: ${new Date().toLocaleString('zh-TW')}\n`;
+            
+            navigator.clipboard.writeText(report).then(() => {
+                alert('測量結果已複製到剪貼簿！');
+            }).catch(() => {
+                // 備用方案：顯示結果讓用戶手動複製
+                const textarea = document.createElement('textarea');
+                textarea.value = report;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('測量結果已複製到剪貼簿！');
+            });
+        });
+    </script>
+</body>
+</html>

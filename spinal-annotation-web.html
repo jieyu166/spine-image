@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>脊椎終板標註工具 - Spine Endplate Annotation</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: 'Microsoft JhengHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 0;
+            min-height: calc(100vh - 200px);
+        }
+        
+        .image-section {
+            padding: 20px;
+            background: #f8f9fa;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        
+        .btn-primary { background: #667eea; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        
+        .canvas-wrapper {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: auto;
+        }
+        
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            cursor: crosshair;
+            border: 2px solid #dee2e6;
+            border-radius: 4px;
+        }
+        
+        .sidebar {
+            background: white;
+            padding: 20px;
+            overflow-y: auto;
+            border-left: 2px solid #e9ecef;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+        }
+        
+        .section-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #495057;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .measurement-card {
+            background: #f8f9fa;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .measurement-card.warning {
+            border-left-color: #ffc107;
+            background: #fff3cd;
+        }
+        
+        .measurement-card.danger {
+            border-left-color: #dc3545;
+            background: #f8d7da;
+        }
+        
+        .level-label {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 15px;
+            margin-bottom: 6px;
+        }
+        
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            margin: 4px 0;
+            font-size: 13px;
+        }
+        
+        .metric-label {
+            color: #6c757d;
+        }
+        
+        .metric-value {
+            font-weight: 500;
+            color: #212529;
+        }
+        
+        .slider-group {
+            margin: 10px 0;
+        }
+        
+        .slider-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 13px;
+            color: #495057;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #dee2e6;
+            outline: none;
+        }
+        
+        .progress-info {
+            background: #e7f3ff;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            border-left: 4px solid #007bff;
+        }
+        
+        .progress-info strong {
+            color: #007bff;
+        }
+        
+        .export-section {
+            background: #d4edda;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .export-section button {
+            width: 100%;
+            margin-top: 10px;
+        }
+        
+        .alert {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+        
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .alert-warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .sidebar {
+                border-left: none;
+                border-top: 2px solid #e9ecef;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏥 脊椎終板標註工具</h1>
+            <p>Spine Endplate Annotation Tool - 用於收集訓練數據</p>
+        </div>
+        
+        <div class="main-content">
+            <!-- 左側：影像區域 -->
+            <div class="image-section">
+                <div class="controls">
+                    <button class="btn-primary" onclick="pasteImage()">📋 貼上影像 (Ctrl+V)</button>
+                    <button class="btn-success" onclick="toggleEdgeDetection()">🔍 邊緣檢測</button>
+                    <button class="btn-warning" onclick="undoLastPoint()">↶ 撤銷</button>
+                    <button class="btn-danger" onclick="clearAll()">🗑️ 清除全部</button>
+                </div>
+                
+                <div class="slider-group">
+                    <label>邊緣檢測閾值: <span id="thresholdValue">30</span></label>
+                    <input type="range" id="edgeThreshold" min="10" max="100" value="30" 
+                           oninput="updateThreshold(this.value)">
+                </div>
+                
+                <div class="canvas-wrapper">
+                    <canvas id="mainCanvas"></canvas>
+                </div>
+            </div>
+            
+            <!-- 右側：分析結果 -->
+            <div class="sidebar">
+                <div class="alert alert-info">
+                    <strong>📝 使用說明：</strong><br>
+                    1. 按 Ctrl+V 貼上脊椎X光影像<br>
+                    2. 依序點擊每個椎間隙的終板（每個4點）<br>
+                    3. 點擊順序：下終板2點 → 上終板2點<br>
+                    4. 完成後點擊「匯出訓練數據」
+                </div>
+                
+                <div class="progress-info">
+                    <strong>標註進度：</strong><span id="progressText">尚未開始</span>
+                </div>
+                
+                <div class="section">
+                    <div class="section-title">📊 椎間隙分析</div>
+                    <div id="measurementsList"></div>
+                </div>
+                
+                <div class="section">
+                    <div class="section-title">⚠️ 異常檢測</div>
+                    <div id="abnormalitiesList"></div>
+                </div>
+                
+                <div class="export-section">
+                    <strong>💾 匯出訓練數據</strong>
+                    <button class="btn-success" onclick="exportTrainingData()">
+                        匯出 JSON + 影像
+                    </button>
+                    <button class="btn-secondary" onclick="copyResults()">
+                        複製結果到剪貼簿
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 全局變數 ====================
+        let canvas, ctx;
+        let originalImage = null;
+        let edgeImage = null;
+        let showEdge = false;
+        let currentPoints = [];
+        let vertebrae = [];
+        let edgeThreshold = 30;
+        
+        // ==================== 初始化 ====================
+        window.onload = function() {
+            canvas = document.getElementById('mainCanvas');
+            ctx = canvas.getContext('2d');
+            
+            // 監聽貼上事件
+            document.addEventListener('paste', handlePaste);
+            canvas.addEventListener('click', handleCanvasClick);
+        };
+        
+        // ==================== 影像處理 ====================
+        function handlePaste(e) {
+            e.preventDefault();
+            const items = e.clipboardData.items;
+            
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    loadImageFromBlob(blob);
+                    return;
+                }
+            }
+            alert('❌ 剪貼簿中沒有圖片！請先複製影像。');
+        }
+        
+        function pasteImage() {
+            navigator.clipboard.read().then(data => {
+                for (let i = 0; i < data.length; i++) {
+                    if (data[i].types.includes('image/png') || data[i].types.includes('image/jpeg')) {
+                        data[i].getType('image/png').then(blob => {
+                            loadImageFromBlob(blob);
+                        });
+                        return;
+                    }
+                }
+                alert('❌ 請先複製圖片到剪貼簿！');
+            }).catch(() => {
+                alert('❌ 請使用 Ctrl+V 貼上圖片，或先複製圖片。');
+            });
+        }
+        
+        function loadImageFromBlob(blob) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    originalImage = img;
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    
+                    if (showEdge) {
+                        applyEdgeDetection();
+                    }
+                    redraw();
+                    updateProgress();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(blob);
+        }
+        
+        // ==================== 邊緣檢測 ====================
+        function toggleEdgeDetection() {
+            showEdge = !showEdge;
+            if (showEdge && originalImage) {
+                applyEdgeDetection();
+            }
+            redraw();
+        }
+        
+        function updateThreshold(value) {
+            edgeThreshold = parseInt(value);
+            document.getElementById('thresholdValue').textContent = value;
+            if (showEdge && originalImage) {
+                applyEdgeDetection();
+            }
+        }
+        
+        function applyEdgeDetection() {
+            if (!originalImage) return;
+            
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = originalImage.width;
+            tempCanvas.height = originalImage.height;
+            
+            tempCtx.drawImage(originalImage, 0, 0);
+            const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const data = imageData.data;
+            
+            // 轉灰階
+            const grayData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
+            for (let i = 0; i < data.length; i += 4) {
+                grayData[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            }
+            
+            // Sobel 邊緣檢測
+            const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+            const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+            const edgeData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
+            
+            for (let y = 1; y < tempCanvas.height - 1; y++) {
+                for (let x = 1; x < tempCanvas.width - 1; x++) {
+                    let gx = 0, gy = 0;
+                    for (let ky = -1; ky <= 1; ky++) {
+                        for (let kx = -1; kx <= 1; kx++) {
+                            const idx = (y + ky) * tempCanvas.width + (x + kx);
+                            const gray = grayData[idx];
+                            const sobelIdx = (ky + 1) * 3 + (kx + 1);
+                            gx += gray * sobelX[sobelIdx];
+                            gy += gray * sobelY[sobelIdx];
+                        }
+                    }
+                    const magnitude = Math.sqrt(gx * gx + gy * gy);
+                    const idx = y * tempCanvas.width + x;
+                    edgeData[idx] = magnitude > edgeThreshold ? 255 : 0;
+                }
+            }
+            
+            // 創建邊緣影像
+            const resultCanvas = document.createElement('canvas');
+            const resultCtx = resultCanvas.getContext('2d');
+            resultCanvas.width = tempCanvas.width;
+            resultCanvas.height = tempCanvas.height;
+            
+            resultCtx.globalAlpha = 0.6;
+            resultCtx.drawImage(originalImage, 0, 0);
+            resultCtx.globalAlpha = 1.0;
+            
+            const resultImageData = resultCtx.getImageData(0, 0, resultCanvas.width, resultCanvas.height);
+            const resultData = resultImageData.data;
+            
+            for (let i = 0; i < edgeData.length; i++) {
+                if (edgeData[i] > 0) {
+                    const pixelIndex = i * 4;
+                    resultData[pixelIndex] = 0;
+                    resultData[pixelIndex + 1] = 255;
+                    resultData[pixelIndex + 2] = 0;
+                    resultData[pixelIndex + 3] = 255;
+                }
+            }
+            
+            resultCtx.putImageData(resultImageData, 0, 0);
+            
+            edgeImage = new Image();
+            edgeImage.src = resultCanvas.toDataURL();
+            edgeImage.onload = () => redraw();
+        }
+        
+        // ==================== 點擊處理 ====================
+        function handleCanvasClick(event) {
+            if (!originalImage) {
+                alert('❌ 請先貼上影像！');
+                return;
+            }
+            
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = (event.clientX - rect.left) * scaleX;
+            const y = (event.clientY - rect.top) * scaleY;
+            
+            currentPoints.push({x, y});
+            
+            if (currentPoints.length === 4) {
+                // 完成一個椎間隙
+                const level = `L${5 - vertebrae.length}/L${6 - vertebrae.length}`;
+                if (vertebrae.length >= 5) {
+                    level = `L${6 - vertebrae.length}/S1`;
+                }
+                
+                vertebrae.push({
+                    level: level,
+                    lowerEndplate: [currentPoints[0], currentPoints[1]],
+                    upperEndplate: [currentPoints[2], currentPoints[3]]
+                });
+                
+                currentPoints = [];
+                updateAnalysis();
+            }
+            
+            redraw();
+            updateProgress();
+        }
+        
+        // ==================== 繪製 ====================
+        function redraw() {
+            if (!originalImage) return;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 繪製影像
+            if (showEdge && edgeImage) {
+                ctx.drawImage(edgeImage, 0, 0);
+            } else {
+                ctx.drawImage(originalImage, 0, 0);
+            }
+            
+            // 繪製已完成的椎間隙
+            vertebrae.forEach((v, idx) => {
+                // 下終板（紅線）
+                drawLine(v.lowerEndplate[0], v.lowerEndplate[1], '#ff0000', 3);
+                // 上終板（藍線）
+                drawLine(v.upperEndplate[0], v.upperEndplate[1], '#0000ff', 3);
+                
+                // 標籤
+                const centerX = (v.lowerEndplate[0].x + v.upperEndplate[1].x) / 2;
+                const centerY = (v.lowerEndplate[0].y + v.upperEndplate[0].y) / 2;
+                
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                ctx.font = 'bold 20px Arial';
+                const textWidth = ctx.measureText(v.level).width;
+                ctx.fillRect(centerX - textWidth/2 - 10, centerY - 15, textWidth + 20, 30);
+                
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(centerX - textWidth/2 - 10, centerY - 15, textWidth + 20, 30);
+                
+                ctx.fillStyle = '#000';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(v.level, centerX, centerY);
+            });
+            
+            // 繪製當前點
+            currentPoints.forEach((p, idx) => {
+                const color = idx < 2 ? '#ff0000' : '#0000ff';
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
+                ctx.fill();
+                
+                // 點序號
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText((idx + 1).toString(), p.x, p.y);
+            });
+        }
+        
+        function drawLine(p1, p2, color, width) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        }
+        
+        // ==================== 分析計算 ====================
+        function calculateAngle(p1, p2, p3, p4) {
+            const angle1 = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+            const angle2 = Math.atan2(p4.y - p3.y, p4.x - p3.x);
+            let diff = Math.abs(angle1 - angle2) * 180 / Math.PI;
+            if (diff > 90) diff = 180 - diff;
+            return diff;
+        }
+        
+        function calculateDiscHeight(lowerEndplate, upperEndplate) {
+            // 計算椎間盤高度（前、中、後）
+            const anterior = Math.abs(upperEndplate[0].y - lowerEndplate[0].y);
+            const posterior = Math.abs(upperEndplate[1].y - lowerEndplate[1].y);
+            const middle = (anterior + posterior) / 2;
+            return {anterior, middle, posterior};
+        }
+        
+        function detectListhesis(vertebrae) {
+            // 檢測滑脫
+            const results = [];
+            for (let i = 0; i < vertebrae.length - 1; i++) {
+                const current = vertebrae[i];
+                const next = vertebrae[i + 1];
+                
+                // 比較後緣位置
+                const currentPost = current.lowerEndplate[1].x;
+                const nextPost = next.upperEndplate[1].x;
+                const shift = currentPost - nextPost;
+                
+                // 計算椎體寬度作為參考
+                const width = Math.abs(current.lowerEndplate[1].x - current.lowerEndplate[0].x);
+                const shiftPercent = (shift / width) * 100;
+                
+                if (Math.abs(shiftPercent) > 5) {
+                    results.push({
+                        level: `${current.level} → ${next.level}`,
+                        type: shift > 0 ? 'Anterolisthesis' : 'Retrolisthesis',
+                        shift: Math.abs(shiftPercent).toFixed(1) + '%'
+                    });
+                }
+            }
+            return results;
+        }
+        
+        function detectDiscNarrowing(vertebrae) {
+            // 檢測椎間盤狹窄
+            const results = [];
+            const heights = [];
+            
+            vertebrae.forEach(v => {
+                const h = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
+                heights.push({level: v.level, height: h.middle});
+            });
+            
+            // L4/5 應該最高
+            if (heights.length >= 4) {
+                const l45Index = heights.findIndex(h => h.level.includes('L4/L5'));
+                if (l45Index >= 0) {
+                    const l45Height = heights[l45Index].height;
+                    
+                    heights.forEach((h, idx) => {
+                        if (idx !== l45Index && idx < l45Index) {
+                            if (h.height > l45Height * 1.1) {
+                                results.push({
+                                    level: h.level,
+                                    issue: '椎間盤高度異常（高於L4/5）'
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+            
+            // 檢查相鄰高度差異
+            for (let i = 0; i < heights.length - 1; i++) {
+                const ratio = heights[i].height / heights[i + 1].height;
+                if (ratio < 0.6 || ratio > 1.67) {
+                    results.push({
+                        level: heights[i].level,
+                        issue: `與下一節段高度差異過大 (${ratio.toFixed(2)}x)`
+                    });
+                }
+            }
+            
+            return results;
+        }
+        
+        function buildVertebraEdges(vertebrae) {
+            // 模仿 slicer_codes.py 的 _build_vertebra_edges
+            const edges = {};
+            
+            for (let i = 0; i < vertebrae.length - 1; i++) {
+                const current = vertebrae[i];
+                const next = vertebrae[i + 1];
+                
+                // 提取椎體名稱（如 L4）
+                const vertebraName = current.level.split('/')[1];
+                
+                // 前緣：x較小的點
+                const upperAnt = current.upperEndplate[0].x < current.upperEndplate[1].x ? 
+                                current.upperEndplate[0] : current.upperEndplate[1];
+                const lowerAnt = next.lowerEndplate[0].x < next.lowerEndplate[1].x ? 
+                                next.lowerEndplate[0] : next.lowerEndplate[1];
+                
+                // 後緣：x較大的點
+                const upperPost = current.upperEndplate[0].x > current.upperEndplate[1].x ? 
+                                 current.upperEndplate[0] : current.upperEndplate[1];
+                const lowerPost = next.lowerEndplate[0].x > next.lowerEndplate[1].x ? 
+                                 next.lowerEndplate[0] : next.lowerEndplate[1];
+                
+                edges[vertebraName] = {
+                    anterior: [upperAnt, lowerAnt],
+                    posterior: [upperPost, lowerPost]
+                };
+            }
+            
+            return edges;
+        }
+        
+        // ==================== UI 更新 ====================
+        function updateProgress() {
+            const total = 5; // L5/S1 到 L1/L2
+            const current = vertebrae.length;
+            const remaining = currentPoints.length;
+            
+            let text = `已完成 ${current}/${total} 個椎間隙`;
+            if (remaining > 0) {
+                text += ` (當前: ${remaining}/4 點)`;
+            }
+            
+            document.getElementById('progressText').textContent = text;
+        }
+        
+        function updateAnalysis() {
+            // 更新測量結果
+            let html = '';
+            vertebrae.forEach(v => {
+                const angle = calculateAngle(
+                    v.lowerEndplate[0], v.lowerEndplate[1],
+                    v.upperEndplate[0], v.upperEndplate[1]
+                );
+                const height = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
+                
+                html += `
+                    <div class="measurement-card">
+                        <div class="level-label">${v.level}</div>
+                        <div class="metric">
+                            <span class="metric-label">角度:</span>
+                            <span class="metric-value">${angle.toFixed(1)}°</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">椎間盤高度:</span>
+                            <span class="metric-value">${height.middle.toFixed(1)} px</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">前/後高度:</span>
+                            <span class="metric-value">${height.anterior.toFixed(1)} / ${height.posterior.toFixed(1)}</span>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('measurementsList').innerHTML = html || '<p style="color: #6c757d;">尚無測量數據</p>';
+            
+            // 更新異常檢測
+            let abnormalHtml = '';
+            
+            if (vertebrae.length >= 2) {
+                const listhesis = detectListhesis(vertebrae);
+                const narrowing = detectDiscNarrowing(vertebrae);
+                
+                listhesis.forEach(l => {
+                    abnormalHtml += `
+                        <div class="measurement-card warning">
+                            <strong>⚠️ ${l.type}</strong><br>
+                            ${l.level}: 滑脫 ${l.shift}
+                        </div>
+                    `;
+                });
+                
+                narrowing.forEach(n => {
+                    abnormalHtml += `
+                        <div class="measurement-card warning">
+                            <strong>⚠️ ${n.level}</strong><br>
+                            ${n.issue}
+                        </div>
+                    `;
+                });
+            }
+            
+            document.getElementById('abnormalitiesList').innerHTML = abnormalHtml || 
+                '<p style="color: #28a745;">✅ 未檢測到明顯異常</p>';
+        }
+        
+        // ==================== 操作功能 ====================
+        function undoLastPoint() {
+            if (currentPoints.length > 0) {
+                currentPoints.pop();
+            } else if (vertebrae.length > 0) {
+                vertebrae.pop();
+                updateAnalysis();
+            }
+            redraw();
+            updateProgress();
+        }
+        
+        function clearAll() {
+            if (confirm('確定要清除所有標記嗎？')) {
+                currentPoints = [];
+                vertebrae = [];
+                redraw();
+                updateProgress();
+                updateAnalysis();
+            }
+        }
+        
+        // ==================== 匯出功能 ====================
+        function exportTrainingData() {
+            if (!originalImage || vertebrae.length === 0) {
+                alert('❌ 請先完成標註！');
+                return;
+            }
+            
+            // 建立 JSON 數據（模仿 slicer_codes.py 格式）
+            const measurements = vertebrae.map(v => {
+                const angle = calculateAngle(
+                    v.lowerEndplate[0], v.lowerEndplate[1],
+                    v.upperEndplate[0], v.upperEndplate[1]
+                );
+                
+                return {
+                    level: v.level,
+                    angle: parseFloat(angle.toFixed(1)),
+                    angle_raw: parseFloat(angle.toFixed(1)),
+                    confidence: 0.95,
+                    measurement_method: "manual_web",
+                    lowerEndplate: [
+                        {x: v.lowerEndplate[0].x, y: v.lowerEndplate[0].y},
+                        {x: v.lowerEndplate[1].x, y: v.lowerEndplate[1].y}
+                    ],
+                    upperEndplate: [
+                        {x: v.upperEndplate[0].x, y: v.upperEndplate[0].y},
+                        {x: v.upperEndplate[1].x, y: v.upperEndplate[1].y}
+                    ]
+                };
+            });
+            
+            const vertebraEdges = buildVertebraEdges(vertebrae);
+            
+            const jsonData = {
+                patient_id: "",
+                study_id: "",
+                study_date: new Date().toISOString().split('T')[0],
+                spine_type: "L",
+                image_type: "neutral",
+                image_path: "",
+                image_dimensions: {
+                    width: originalImage.width,
+                    height: originalImage.height
+                },
+                annotator: {
+                    name: "",
+                    id: "",
+                    specialty: "",
+                    experience_years: null
+                },
+                annotation_date: new Date().toISOString(),
+                measurements: measurements,
+                vertebra_edges: vertebraEdges,
+                clinical_notes: {
+                    original_report: ""
+                },
+                surgery_info: {
+                    surgery_done: false
+                }
+            };
+            
+            // 下載 JSON
+            const jsonBlob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
+            const jsonUrl = URL.createObjectURL(jsonBlob);
+            const jsonLink = document.createElement('a');
+            const timestamp = new Date().getTime();
+            jsonLink.href = jsonUrl;
+            jsonLink.download = `spine_annotation_${timestamp}.json`;
+            jsonLink.click();
+            URL.revokeObjectURL(jsonUrl);
+            
+            // 下載影像
+            canvas.toBlob(blob => {
+                const imgUrl = URL.createObjectURL(blob);
+                const imgLink = document.createElement('a');
+                imgLink.href = imgUrl;
+                imgLink.download = `spine_image_${timestamp}.png`;
+                imgLink.click();
+                URL.revokeObjectURL(imgUrl);
+            });
+            
+            alert('✅ 已匯出 JSON 和影像檔案！\n請將這些檔案放入訓練數據資料夾。');
+        }
+        
+        function copyResults() {
+            let report = '脊椎終板標註結果\n================\n\n';
+            
+            vertebrae.forEach(v => {
+                const angle = calculateAngle(
+                    v.lowerEndplate[0], v.lowerEndplate[1],
+                    v.upperEndplate[0], v.upperEndplate[1]
+                );
+                const height = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
+                
+                report += `${v.level}:\n`;
+                report += `  角度: ${angle.toFixed(1)}°\n`;
+                report += `  椎間盤高度: ${height.middle.toFixed(1)} px\n`;
+                report += `  前/後高度: ${height.anterior.toFixed(1)} / ${height.posterior.toFixed(1)}\n\n`;
+            });
+            
+            if (vertebrae.length >= 2) {
+                const listhesis = detectListhesis(vertebrae);
+                const narrowing = detectDiscNarrowing(vertebrae);
+                
+                if (listhesis.length > 0 || narrowing.length > 0) {
+                    report += '異常檢測:\n';
+                    listhesis.forEach(l => {
+                        report += `  ⚠️ ${l.level}: ${l.type} ${l.shift}\n`;
+                    });
+                    narrowing.forEach(n => {
+                        report += `  ⚠️ ${n.level}: ${n.issue}\n`;
+                    });
+                } else {
+                    report += '✅ 未檢測到明顯異常\n';
+                }
+            }
+            
+            report += `\n報告時間: ${new Date().toLocaleString('zh-TW')}`;
+            
+            navigator.clipboard.writeText(report).then(() => {
+                alert('✅ 結果已複製到剪貼簿！');
+            }).catch(() => {
+                alert('❌ 複製失敗，請手動複製。');
+            });
+        }
+    </script>
+</body>
+</html>
+
