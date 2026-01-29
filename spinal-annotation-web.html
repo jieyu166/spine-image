@@ -3,358 +3,596 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>脊椎終板標註工具 - Spine Endplate Annotation</title>
+    <title>脊椎椎體標註工具 V2 - Vertebra Annotation</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        
+
         body {
             font-family: 'Microsoft JhengHei', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             min-height: 100vh;
-            padding: 20px;
+            padding: 15px;
         }
-        
+
         .container {
-            max-width: 1600px;
+            max-width: 1800px;
             margin: 0 auto;
-            background: white;
+            background: #fff;
             border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
             overflow: hidden;
         }
-        
+
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
             color: white;
-            padding: 25px;
-            text-align: center;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
-        
-        .header h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
+
+        .header h1 { font-size: 24px; }
+        .header-info { font-size: 13px; opacity: 0.9; }
+
+        .spine-type-selector {
+            display: flex;
+            gap: 10px;
         }
-        
-        .header p {
-            opacity: 0.9;
-            font-size: 14px;
+
+        .spine-type-btn {
+            padding: 10px 25px;
+            border: 2px solid white;
+            background: transparent;
+            color: white;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
         }
-        
+
+        .spine-type-btn.active {
+            background: white;
+            color: #16213e;
+        }
+
+        .spine-type-btn:hover:not(.active) {
+            background: rgba(255,255,255,0.2);
+        }
+
         .main-content {
             display: grid;
-            grid-template-columns: 1fr 400px;
-            gap: 0;
-            min-height: calc(100vh - 200px);
+            grid-template-columns: 1fr 380px;
+            min-height: calc(100vh - 150px);
         }
-        
+
         .image-section {
-            padding: 20px;
-            background: #f8f9fa;
+            padding: 15px;
+            background: #f0f2f5;
             display: flex;
             flex-direction: column;
         }
-        
-        .controls {
+
+        .toolbar {
             display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
+            gap: 8px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
+            align-items: center;
         }
-        
-        button {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.3s;
+
+        .toolbar-group {
+            display: flex;
+            gap: 5px;
+            padding: 5px 10px;
+            background: white;
+            border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-        
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+
+        button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
         }
-        
-        .btn-primary { background: #667eea; color: white; }
-        .btn-success { background: #28a745; color: white; }
-        .btn-warning { background: #ffc107; color: #333; }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn-secondary { background: #6c757d; color: white; }
-        
-        .canvas-wrapper {
+
+        button:hover { transform: translateY(-1px); }
+
+        .btn-primary { background: #3498db; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-secondary { background: #95a5a6; color: white; }
+        .btn-info { background: #9b59b6; color: white; }
+
+        .canvas-container {
             flex: 1;
             display: flex;
             justify-content: center;
             align-items: center;
-            background: white;
+            background: #2c3e50;
             border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            overflow: auto;
+            overflow: hidden;
+            position: relative;
         }
-        
+
         canvas {
             max-width: 100%;
             max-height: 100%;
             cursor: crosshair;
-            border: 2px solid #dee2e6;
-            border-radius: 4px;
         }
-        
+
+        .zoom-info {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
         .sidebar {
             background: white;
-            padding: 20px;
+            padding: 15px;
             overflow-y: auto;
-            border-left: 2px solid #e9ecef;
+            border-left: 2px solid #e0e0e0;
         }
-        
+
         .section {
-            margin-bottom: 25px;
+            margin-bottom: 20px;
         }
-        
+
         .section-title {
-            font-size: 16px;
+            font-size: 14px;
             font-weight: bold;
-            color: #495057;
-            margin-bottom: 12px;
-            padding-bottom: 8px;
-            border-bottom: 2px solid #667eea;
-        }
-        
-        .measurement-card {
-            background: #f8f9fa;
-            padding: 12px;
+            color: #2c3e50;
             margin-bottom: 10px;
+            padding: 8px 12px;
+            background: #ecf0f1;
             border-radius: 6px;
-            border-left: 4px solid #667eea;
+            border-left: 4px solid #3498db;
         }
-        
-        .measurement-card.warning {
-            border-left-color: #ffc107;
+
+        .progress-bar {
+            height: 8px;
+            background: #ecf0f1;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #27ae60, #2ecc71);
+            transition: width 0.3s;
+        }
+
+        .progress-text {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-bottom: 5px;
+        }
+
+        .current-task {
             background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
         }
-        
-        .measurement-card.danger {
-            border-left-color: #dc3545;
-            background: #f8d7da;
+
+        .current-task strong { color: #856404; }
+
+        .vertebra-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            overflow: hidden;
         }
-        
-        .level-label {
-            font-weight: bold;
-            color: #667eea;
-            font-size: 15px;
-            margin-bottom: 6px;
-        }
-        
-        .metric {
+
+        .vertebra-header {
             display: flex;
             justify-content: space-between;
-            margin: 4px 0;
-            font-size: 13px;
+            align-items: center;
+            padding: 10px 12px;
+            background: #e9ecef;
+            cursor: pointer;
         }
-        
-        .metric-label {
-            color: #6c757d;
-        }
-        
-        .metric-value {
-            font-weight: 500;
-            color: #212529;
-        }
-        
-        .slider-group {
-            margin: 10px 0;
-        }
-        
-        .slider-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-size: 13px;
+
+        .vertebra-header:hover { background: #dee2e6; }
+
+        .vertebra-name {
+            font-weight: bold;
             color: #495057;
         }
-        
-        input[type="range"] {
-            width: 100%;
-            height: 6px;
-            border-radius: 3px;
-            background: #dee2e6;
-            outline: none;
+
+        .vertebra-name select {
+            font-weight: bold;
+            font-size: 14px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 2px 5px;
+            background: white;
         }
-        
-        .progress-info {
-            background: #e7f3ff;
+
+        .vertebra-status {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 10px;
+            background: #6c757d;
+            color: white;
+        }
+
+        .vertebra-status.complete { background: #28a745; }
+        .vertebra-status.current { background: #ffc107; color: #333; }
+        .vertebra-status.warning { background: #dc3545; }
+
+        .vertebra-body {
+            padding: 10px 12px;
+            font-size: 12px;
+            display: none;
+        }
+
+        .vertebra-body.show { display: block; }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .metric-row:last-child { border-bottom: none; }
+
+        .metric-label { color: #6c757d; }
+        .metric-value { font-weight: 500; }
+        .metric-value.danger { color: #dc3545; font-weight: bold; }
+        .metric-value.warning { color: #f39c12; }
+        .metric-value.success { color: #27ae60; }
+
+        .disc-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 8px;
+            margin-bottom: 10px;
             padding: 12px;
+        }
+
+        .disc-card.abnormal {
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+        }
+
+        .disc-header {
+            font-weight: bold;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .disc-metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 5px;
+            font-size: 11px;
+        }
+
+        .disc-metric {
+            background: rgba(255,255,255,0.2);
+            padding: 5px 8px;
+            border-radius: 4px;
+        }
+
+        .abnormality-card {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-left: 4px solid #dc3545;
+            padding: 10px;
             border-radius: 6px;
-            margin-bottom: 15px;
-            border-left: 4px solid #007bff;
+            margin-bottom: 8px;
+            font-size: 12px;
         }
-        
-        .progress-info strong {
-            color: #007bff;
-        }
-        
-        .export-section {
-            background: #d4edda;
-            padding: 15px;
-            border-radius: 6px;
-            border: 1px solid #c3e6cb;
-        }
-        
-        .export-section button {
-            width: 100%;
-            margin-top: 10px;
-        }
-        
-        .alert {
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            font-size: 13px;
-        }
-        
-        .alert-info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border: 1px solid #bee5eb;
-        }
-        
-        .alert-warning {
+
+        .abnormality-card.warning {
             background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeaa7;
+            border-color: #ffc107;
+            border-left-color: #f39c12;
         }
-        
+
+        .export-panel {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .export-panel button {
+            width: 100%;
+            margin-top: 8px;
+            justify-content: center;
+        }
+
+        .help-text {
+            font-size: 11px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .point-guide {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 5px;
+            margin-top: 10px;
+            font-size: 11px;
+        }
+
+        .point-item {
+            padding: 5px;
+            border-radius: 4px;
+            text-align: center;
+        }
+
+        .point-item.active {
+            font-weight: bold;
+            box-shadow: 0 0 0 2px #333;
+        }
+
+        .point-1 { background: #ffcccc; }
+        .point-2 { background: #ccffcc; }
+        .point-3 { background: #ccccff; }
+        .point-4 { background: #ffffcc; }
+
         @media (max-width: 1200px) {
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-            
-            .sidebar {
-                border-left: none;
-                border-top: 2px solid #e9ecef;
-            }
+            .main-content { grid-template-columns: 1fr; }
+            .sidebar { border-left: none; border-top: 2px solid #e0e0e0; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🏥 脊椎終板標註工具</h1>
-            <p>Spine Endplate Annotation Tool - 用於收集訓練數據</p>
+            <div>
+                <h1>🦴 脊椎椎體標註工具 V2</h1>
+                <div class="header-info">每個椎體標註4個角點，自動計算椎間盤與異常</div>
+            </div>
+            <div class="spine-type-selector">
+                <button class="spine-type-btn active" data-type="L" onclick="setSpineType('L')">
+                    腰椎 L-Spine
+                </button>
+                <button class="spine-type-btn" data-type="C" onclick="setSpineType('C')">
+                    頸椎 C-Spine
+                </button>
+            </div>
         </div>
-        
+
         <div class="main-content">
-            <!-- 左側：影像區域 -->
             <div class="image-section">
-                <div class="controls">
-                    <button class="btn-primary" onclick="pasteImage()">📋 貼上影像 (Ctrl+V)</button>
-                    <button class="btn-success" onclick="toggleEdgeDetection()">🔍 邊緣檢測</button>
-                    <button class="btn-warning" onclick="undoLastPoint()">↶ 撤銷</button>
-                    <button class="btn-danger" onclick="clearAll()">🗑️ 清除全部</button>
+                <div class="toolbar">
+                    <div class="toolbar-group">
+                        <button class="btn-primary" onclick="loadImage()">📂 載入影像</button>
+                        <button class="btn-primary" onclick="pasteImage()">📋 貼上 (Ctrl+V)</button>
+                    </div>
+                    <div class="toolbar-group">
+                        <button class="btn-warning" onclick="undoPoint()">↶ 撤銷點</button>
+                        <button class="btn-danger" onclick="deleteCurrentVertebra()">🗑️ 刪除椎體</button>
+                        <button class="btn-secondary" onclick="clearAll()">清除全部</button>
+                        <button class="btn-success" id="btnFinishEarly" onclick="finishEarly()" style="display:none;">✅ 結束標註</button>
+                    </div>
+                    <div class="toolbar-group">
+                        <button class="btn-info" onclick="toggleContrast()">🔆 對比增強</button>
+                        <button class="btn-secondary" onclick="zoomIn()">🔍+</button>
+                        <button class="btn-secondary" onclick="zoomOut()">🔍-</button>
+                        <button class="btn-secondary" onclick="resetZoom()">1:1</button>
+                    </div>
                 </div>
-                
-                <div class="slider-group">
-                    <label>邊緣檢測閾值: <span id="thresholdValue">30</span></label>
-                    <input type="range" id="edgeThreshold" min="10" max="100" value="30" 
-                           oninput="updateThreshold(this.value)">
-                </div>
-                
-                <div class="canvas-wrapper">
+
+                <div class="canvas-container">
                     <canvas id="mainCanvas"></canvas>
+                    <div class="zoom-info">縮放: <span id="zoomLevel">100</span>%</div>
                 </div>
             </div>
-            
-            <!-- 右側：分析結果 -->
+
             <div class="sidebar">
-                <div class="alert alert-info">
-                    <strong>📝 使用說明：</strong><br>
-                    1. 按 Ctrl+V 貼上脊椎X光影像<br>
-                    2. 依序點擊每個椎間隙的終板（每個4點）<br>
-                    3. 點擊順序：下終板2點 → 上終板2點<br>
-                    4. 完成後點擊「匯出訓練數據」
-                </div>
-                
-                <div class="progress-info">
-                    <strong>標註進度：</strong><span id="progressText">尚未開始</span>
-                </div>
-                
+                <!-- 進度 -->
                 <div class="section">
-                    <div class="section-title">📊 椎間隙分析</div>
-                    <div id="measurementsList"></div>
+                    <div class="progress-text">標註進度: <span id="progressCount">0</span> / <span id="totalCount">6</span> 椎體</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+                    </div>
                 </div>
-                
+
+                <!-- 當前任務 -->
+                <div class="current-task" id="currentTask">
+                    <strong>📍 下一步：</strong><span id="taskText">請先載入或貼上影像</span>
+                    <div class="point-guide" id="pointGuide" style="display: none;">
+                        <div class="point-item point-1" id="guide1">① 前上角</div>
+                        <div class="point-item point-2" id="guide2">② 後上角</div>
+                        <div class="point-item point-3" id="guide3">③ 後下角</div>
+                        <div class="point-item point-4" id="guide4">④ 前下角</div>
+                    </div>
+                </div>
+
+                <!-- 椎體列表 -->
+                <div class="section">
+                    <div class="section-title">📋 椎體列表</div>
+                    <div id="vertebraList"></div>
+                </div>
+
+                <!-- 椎間盤分析 -->
+                <div class="section">
+                    <div class="section-title">💿 椎間盤分析</div>
+                    <div id="discAnalysis"></div>
+                </div>
+
+                <!-- 異常檢測 -->
                 <div class="section">
                     <div class="section-title">⚠️ 異常檢測</div>
-                    <div id="abnormalitiesList"></div>
+                    <div id="abnormalities"></div>
                 </div>
-                
-                <div class="export-section">
-                    <strong>💾 匯出訓練數據</strong>
-                    <button class="btn-success" onclick="exportTrainingData()">
-                        匯出 JSON + 影像
-                    </button>
-                    <button class="btn-secondary" onclick="copyResults()">
-                        複製結果到剪貼簿
-                    </button>
+
+                <!-- 匯出 -->
+                <div class="export-panel">
+                    <strong>💾 匯出數據</strong>
+                    <div class="help-text">完成標註後匯出訓練數據</div>
+                    <button class="btn-success" onclick="exportData()">匯出 JSON</button>
+                    <button class="btn-info" onclick="exportReport()">匯出報告</button>
                 </div>
             </div>
         </div>
     </div>
 
+    <input type="file" id="fileInput" accept="image/*" style="display: none;" onchange="handleFileSelect(event)">
+
     <script>
-        // ==================== 全局變數 ====================
+        // ==================== 配置 ====================
+        // 椎體列表：按解剖學由上到下排列
+        // boundary 標記邊界椎體：'upper' = 只有上終板(2點)，'lower' = 只有下終板(2點)
+        const CONFIG = {
+            L: {
+                vertebrae: ['T12', 'L1', 'L2', 'L3', 'L4', 'L5', 'S1'],
+                boundary: { 'T12': 'lower', 'S1': 'upper' },
+                direction: 'bottom-up', // 由下到上標註
+                expectedHeightPattern: 'L4L5_highest',
+            },
+            C: {
+                vertebrae: ['C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'T1'],
+                boundary: { 'C2': 'lower', 'T1': 'upper' },
+                direction: 'top-down', // 由上到下標註
+                expectedHeightPattern: 'increasing',
+            }
+        };
+
+        const COLORS = {
+            point1: '#ff6b6b', // 前上角 - 紅
+            point2: '#51cf66', // 後上角 - 綠
+            point3: '#339af0', // 後下角 - 藍
+            point4: '#fcc419', // 前下角 - 黃
+            line: '#ffffff',
+            currentVertebra: '#00ff00',
+            completedVertebra: '#3498db',
+            abnormalVertebra: '#e74c3c',
+            boundaryVertebra: '#9b59b6'
+        };
+
+        // ==================== 狀態 ====================
         let canvas, ctx;
         let originalImage = null;
-        let edgeImage = null;
-        let showEdge = false;
-        let currentPoints = [];
+        let spineType = 'L';
         let vertebrae = [];
-        let edgeThreshold = 30;
-        
+        let currentPoints = [];
+        let zoom = 1;
+        let panX = 0, panY = 0;
+        let isDragging = false;
+        let wasDragging = false; // 追蹤是否實際拖曳過（用於決定是否阻止右鍵選單）
+        let lastMousePos = {x: 0, y: 0};
+        let contrastEnhanced = false;
+        let processedImage = null;
+        let annotationFinished = false; // 提前結束標註
+
+        // ==================== 輔助函數 ====================
+        function getNextVertebraName() {
+            if (annotationFinished) return null;
+            const config = CONFIG[spineType];
+            const idx = vertebrae.length;
+            if (idx >= config.vertebrae.length) return null;
+            if (config.direction === 'bottom-up') {
+                return config.vertebrae[config.vertebrae.length - 1 - idx];
+            } else {
+                return config.vertebrae[idx];
+            }
+        }
+
+        function isBoundary(name) {
+            const config = CONFIG[spineType];
+            return config.boundary[name] || null;
+        }
+
+        function getRequiredPoints(name) {
+            // 邊界椎體只需 2 點，完整椎體 4 點
+            return isBoundary(name) ? 2 : 4;
+        }
+
+        function getPointLabelsForVertebra(name) {
+            const b = isBoundary(name);
+            if (b === 'upper') {
+                // S1/T1: 只有上終板 → 前上角, 後上角
+                return ['前上角', '後上角'];
+            } else if (b === 'lower') {
+                // T12/C2: 只有下終板 → 前下角, 後下角
+                return ['前下角', '後下角'];
+            }
+            return ['前上角', '後上角', '後下角', '前下角'];
+        }
+
         // ==================== 初始化 ====================
         window.onload = function() {
             canvas = document.getElementById('mainCanvas');
             ctx = canvas.getContext('2d');
-            
-            // 監聽貼上事件
+
+            canvas.addEventListener('contextmenu', e => {
+                // 只在拖曳平移時阻止右鍵選單，靜止右鍵允許「另存圖片」
+                if (wasDragging) {
+                    e.preventDefault();
+                    wasDragging = false;
+                }
+            });
             document.addEventListener('paste', handlePaste);
             canvas.addEventListener('click', handleCanvasClick);
+            canvas.addEventListener('wheel', handleWheel);
+            canvas.addEventListener('mousedown', handleMouseDown);
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseup', handleMouseUp);
+            canvas.addEventListener('mouseleave', handleMouseUp);
+
+            document.addEventListener('keydown', handleKeyDown);
+
+            updateUI();
         };
-        
+
         // ==================== 影像處理 ====================
+        function loadImage() {
+            document.getElementById('fileInput').click();
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) loadImageFromFile(file);
+        }
+
         function handlePaste(e) {
             e.preventDefault();
             const items = e.clipboardData.items;
-            
-            for (let i = 0; i < items.length; i++) {
-                if (items[i].type.indexOf('image') !== -1) {
-                    const blob = items[i].getAsFile();
-                    loadImageFromBlob(blob);
+            for (let item of items) {
+                if (item.type.indexOf('image') !== -1) {
+                    loadImageFromFile(item.getAsFile());
                     return;
                 }
             }
-            alert('❌ 剪貼簿中沒有圖片！請先複製影像。');
         }
-        
+
         function pasteImage() {
             navigator.clipboard.read().then(data => {
-                for (let i = 0; i < data.length; i++) {
-                    if (data[i].types.includes('image/png') || data[i].types.includes('image/jpeg')) {
-                        data[i].getType('image/png').then(blob => {
-                            loadImageFromBlob(blob);
-                        });
-                        return;
+                for (let item of data) {
+                    for (let type of item.types) {
+                        if (type.startsWith('image/')) {
+                            item.getType(type).then(blob => loadImageFromFile(blob));
+                            return;
+                        }
                     }
                 }
-                alert('❌ 請先複製圖片到剪貼簿！');
-            }).catch(() => {
-                alert('❌ 請使用 Ctrl+V 貼上圖片，或先複製圖片。');
-            });
+                alert('剪貼簿中沒有圖片');
+            }).catch(() => alert('請使用 Ctrl+V 貼上'));
         }
-        
-        function loadImageFromBlob(blob) {
+
+        function loadImageFromFile(file) {
             const reader = new FileReader();
             reader.onload = function(e) {
                 const img = new Image();
@@ -362,548 +600,987 @@
                     originalImage = img;
                     canvas.width = img.width;
                     canvas.height = img.height;
-                    
-                    if (showEdge) {
-                        applyEdgeDetection();
-                    }
+                    resetZoom();
+                    contrastEnhanced = false;
+                    processedImage = null;
                     redraw();
-                    updateProgress();
+                    updateUI();
                 };
                 img.src = e.target.result;
             };
-            reader.readAsDataURL(blob);
+            reader.readAsDataURL(file);
         }
-        
-        // ==================== 邊緣檢測 ====================
-        function toggleEdgeDetection() {
-            showEdge = !showEdge;
-            if (showEdge && originalImage) {
-                applyEdgeDetection();
+
+        function toggleContrast() {
+            if (!originalImage) return;
+            contrastEnhanced = !contrastEnhanced;
+
+            if (contrastEnhanced && !processedImage) {
+                const tempCanvas = document.createElement('canvas');
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCanvas.width = originalImage.width;
+                tempCanvas.height = originalImage.height;
+                tempCtx.drawImage(originalImage, 0, 0);
+
+                const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+                const data = imageData.data;
+
+                let min = 255, max = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    const gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+                    min = Math.min(min, gray);
+                    max = Math.max(max, gray);
+                }
+
+                const range = max - min || 1;
+                for (let i = 0; i < data.length; i += 4) {
+                    for (let j = 0; j < 3; j++) {
+                        data[i+j] = Math.round(((data[i+j] - min) / range) * 255);
+                    }
+                }
+
+                tempCtx.putImageData(imageData, 0, 0);
+                processedImage = new Image();
+                processedImage.src = tempCanvas.toDataURL();
+                processedImage.onload = () => redraw();
+            } else {
+                redraw();
             }
+        }
+
+        // ==================== 縮放和平移 ====================
+        function handleWheel(e) {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? 0.9 : 1.1;
+            const newZoom = Math.max(0.1, Math.min(5, zoom * delta));
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            panX = mouseX - (mouseX - panX) * (newZoom / zoom);
+            panY = mouseY - (mouseY - panY) * (newZoom / zoom);
+
+            zoom = newZoom;
+            document.getElementById('zoomLevel').textContent = Math.round(zoom * 100);
             redraw();
         }
-        
-        function updateThreshold(value) {
-            edgeThreshold = parseInt(value);
-            document.getElementById('thresholdValue').textContent = value;
-            if (showEdge && originalImage) {
-                applyEdgeDetection();
+
+        function handleMouseDown(e) {
+            if (e.button === 1 || e.button === 2) {
+                isDragging = true;
+                lastMousePos = {x: e.clientX, y: e.clientY};
+                e.preventDefault();
             }
         }
-        
-        function applyEdgeDetection() {
-            if (!originalImage) return;
-            
-            const tempCanvas = document.createElement('canvas');
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCanvas.width = originalImage.width;
-            tempCanvas.height = originalImage.height;
-            
-            tempCtx.drawImage(originalImage, 0, 0);
-            const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-            const data = imageData.data;
-            
-            // 轉灰階
-            const grayData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
-            for (let i = 0; i < data.length; i += 4) {
-                grayData[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+
+        function handleMouseMove(e) {
+            if (isDragging) {
+                panX += e.clientX - lastMousePos.x;
+                panY += e.clientY - lastMousePos.y;
+                lastMousePos = {x: e.clientX, y: e.clientY};
+                wasDragging = true;
+                redraw();
             }
-            
-            // Sobel 邊緣檢測
-            const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
-            const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
-            const edgeData = new Uint8ClampedArray(tempCanvas.width * tempCanvas.height);
-            
-            for (let y = 1; y < tempCanvas.height - 1; y++) {
-                for (let x = 1; x < tempCanvas.width - 1; x++) {
-                    let gx = 0, gy = 0;
-                    for (let ky = -1; ky <= 1; ky++) {
-                        for (let kx = -1; kx <= 1; kx++) {
-                            const idx = (y + ky) * tempCanvas.width + (x + kx);
-                            const gray = grayData[idx];
-                            const sobelIdx = (ky + 1) * 3 + (kx + 1);
-                            gx += gray * sobelX[sobelIdx];
-                            gy += gray * sobelY[sobelIdx];
-                        }
-                    }
-                    const magnitude = Math.sqrt(gx * gx + gy * gy);
-                    const idx = y * tempCanvas.width + x;
-                    edgeData[idx] = magnitude > edgeThreshold ? 255 : 0;
-                }
-            }
-            
-            // 創建邊緣影像
-            const resultCanvas = document.createElement('canvas');
-            const resultCtx = resultCanvas.getContext('2d');
-            resultCanvas.width = tempCanvas.width;
-            resultCanvas.height = tempCanvas.height;
-            
-            resultCtx.globalAlpha = 0.6;
-            resultCtx.drawImage(originalImage, 0, 0);
-            resultCtx.globalAlpha = 1.0;
-            
-            const resultImageData = resultCtx.getImageData(0, 0, resultCanvas.width, resultCanvas.height);
-            const resultData = resultImageData.data;
-            
-            for (let i = 0; i < edgeData.length; i++) {
-                if (edgeData[i] > 0) {
-                    const pixelIndex = i * 4;
-                    resultData[pixelIndex] = 0;
-                    resultData[pixelIndex + 1] = 255;
-                    resultData[pixelIndex + 2] = 0;
-                    resultData[pixelIndex + 3] = 255;
-                }
-            }
-            
-            resultCtx.putImageData(resultImageData, 0, 0);
-            
-            edgeImage = new Image();
-            edgeImage.src = resultCanvas.toDataURL();
-            edgeImage.onload = () => redraw();
         }
-        
+
+        function handleMouseUp() {
+            isDragging = false;
+            // wasDragging 由 contextmenu handler 重置，不在此重置
+        }
+
+        function zoomIn() { zoom = Math.min(5, zoom * 1.2); document.getElementById('zoomLevel').textContent = Math.round(zoom * 100); redraw(); }
+        function zoomOut() { zoom = Math.max(0.1, zoom / 1.2); document.getElementById('zoomLevel').textContent = Math.round(zoom * 100); redraw(); }
+        function resetZoom() { zoom = 1; panX = 0; panY = 0; document.getElementById('zoomLevel').textContent = '100'; redraw(); }
+
+        // ==================== 脊椎類型 ====================
+        function setSpineType(type) {
+            if (vertebrae.length > 0) {
+                if (!confirm('切換脊椎類型會清除現有標註，確定嗎？')) return;
+                vertebrae = [];
+                currentPoints = [];
+                annotationFinished = false;
+            }
+            spineType = type;
+            document.querySelectorAll('.spine-type-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.type === type);
+            });
+            updateUI();
+            redraw();
+        }
+
         // ==================== 點擊處理 ====================
         function handleCanvasClick(event) {
-            if (!originalImage) {
-                alert('❌ 請先貼上影像！');
-                return;
-            }
-            
+            if (!originalImage || isDragging) return;
+
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
-            const x = (event.clientX - rect.left) * scaleX;
-            const y = (event.clientY - rect.top) * scaleY;
-            
-            currentPoints.push({x, y});
-            
-            if (currentPoints.length === 4) {
-                // 完成一個椎間隙
-                const level = `L${5 - vertebrae.length}/L${6 - vertebrae.length}`;
-                if (vertebrae.length >= 5) {
-                    level = `L${6 - vertebrae.length}/S1`;
-                }
-                
-                vertebrae.push({
-                    level: level,
-                    lowerEndplate: [currentPoints[0], currentPoints[1]],
-                    upperEndplate: [currentPoints[2], currentPoints[3]]
-                });
-                
-                currentPoints = [];
-                updateAnalysis();
+
+            const canvasX = (event.clientX - rect.left) * scaleX;
+            const canvasY = (event.clientY - rect.top) * scaleY;
+            const x = (canvasX - panX) / zoom;
+            const y = (canvasY - panY) / zoom;
+
+            if (x < 0 || x > originalImage.width || y < 0 || y > originalImage.height) return;
+
+            const nextName = getNextVertebraName();
+            if (!nextName) {
+                alert('已達到最大椎體數量');
+                return;
             }
-            
+
+            const requiredPts = getRequiredPoints(nextName);
+            currentPoints.push({x, y});
+
+            if (currentPoints.length === requiredPts) {
+                const boundaryType = isBoundary(nextName);
+                let sortedPoints;
+
+                if (boundaryType === 'upper') {
+                    // S1/T1: 只有前上角、後上角
+                    sortedPoints = normalizeEndplate(currentPoints);
+                } else if (boundaryType === 'lower') {
+                    // T12/C2: 只有前下角、後下角
+                    sortedPoints = normalizeEndplate(currentPoints);
+                } else {
+                    // 完整椎體: 4 點
+                    sortedPoints = normalizePoints(currentPoints);
+                }
+
+                vertebrae.push({
+                    name: nextName,
+                    points: sortedPoints,
+                    boundaryType: boundaryType,
+                    anteriorHeight: null,
+                    posteriorHeight: null
+                });
+
+                calculateVertebraMetrics(vertebrae.length - 1);
+                currentPoints = [];
+            }
+
             redraw();
-            updateProgress();
+            updateUI();
         }
-        
+
+        function normalizeEndplate(points) {
+            // 2 點: x 較小的在前（anterior）
+            const sorted = [...points].sort((a, b) => a.x - b.x);
+            return [sorted[0], sorted[1]]; // [anterior, posterior]
+        }
+
+        function normalizePoints(points) {
+            // 4 點: [前上, 後上, 後下, 前下]
+            const sorted = [...points].sort((a, b) => a.y - b.y);
+            const topPoints = sorted.slice(0, 2);
+            const bottomPoints = sorted.slice(2, 4);
+
+            topPoints.sort((a, b) => a.x - b.x);
+            bottomPoints.sort((a, b) => a.x - b.x);
+
+            return [
+                topPoints[0],     // 前上角 (anterior-superior)
+                topPoints[1],     // 後上角 (posterior-superior)
+                bottomPoints[1],  // 後下角 (posterior-inferior)
+                bottomPoints[0]   // 前下角 (anterior-inferior)
+            ];
+        }
+
+        function calculateVertebraMetrics(index) {
+            const v = vertebrae[index];
+            if (v.boundaryType) {
+                // 邊界椎體只有一條終板，無法計算前後緣高度
+                v.anteriorHeight = null;
+                v.posteriorHeight = null;
+                return;
+            }
+            const pts = v.points;
+            v.anteriorHeight = Math.sqrt(
+                Math.pow(pts[3].x - pts[0].x, 2) + Math.pow(pts[3].y - pts[0].y, 2)
+            );
+            v.posteriorHeight = Math.sqrt(
+                Math.pow(pts[2].x - pts[1].x, 2) + Math.pow(pts[2].y - pts[1].y, 2)
+            );
+        }
+
+        // ==================== 取得終板座標（統一介面）====================
+        function getUpperEndplate(v) {
+            // 取得椎體上終板的 [anterior, posterior] 座標
+            if (v.boundaryType === 'upper') {
+                // S1/T1: 只有上終板 [前上, 後上]
+                return [v.points[0], v.points[1]];
+            } else if (v.boundaryType === 'lower') {
+                // T12/C2: 沒有上終板
+                return null;
+            }
+            // 完整椎體: [前上, 後上]
+            return [v.points[0], v.points[1]];
+        }
+
+        function getLowerEndplate(v) {
+            // 取得椎體下終板的 [anterior, posterior] 座標
+            if (v.boundaryType === 'lower') {
+                // T12/C2: 只有下終板 [前下, 後下]
+                return [v.points[0], v.points[1]];
+            } else if (v.boundaryType === 'upper') {
+                // S1/T1: 沒有下終板
+                return null;
+            }
+            // 完整椎體: [前下, 後下]
+            return [v.points[3], v.points[2]];
+        }
+
+        function getPosteriorPoints(v) {
+            // 取得後緣的 [上, 下] 座標，用於滑脫檢測
+            if (v.boundaryType === 'upper') {
+                // S1/T1: 只有上終板，後緣上點 = posterior-superior
+                return { top: v.points[1], bottom: null };
+            } else if (v.boundaryType === 'lower') {
+                // T12/C2: 只有下終板，後緣下點 = posterior-inferior
+                return { top: null, bottom: v.points[1] };
+            }
+            return { top: v.points[1], bottom: v.points[2] };
+        }
+
+        // ==================== 快捷鍵 ====================
+        function handleKeyDown(e) {
+            if (e.ctrlKey && e.key === 'z') {
+                e.preventDefault();
+                undoPoint();
+            }
+        }
+
+        function undoPoint() {
+            if (currentPoints.length > 0) {
+                currentPoints.pop();
+            } else if (vertebrae.length > 0) {
+                vertebrae.pop();
+                annotationFinished = false; // 撤銷後可繼續標註
+            }
+            redraw();
+            updateUI();
+        }
+
+        function deleteCurrentVertebra() {
+            if (currentPoints.length > 0) {
+                currentPoints = [];
+            } else if (vertebrae.length > 0) {
+                vertebrae.pop();
+                annotationFinished = false; // 刪除椎體後可繼續標註
+            }
+            redraw();
+            updateUI();
+        }
+
+        function clearAll() {
+            if (confirm('確定清除所有標註？')) {
+                vertebrae = [];
+                currentPoints = [];
+                annotationFinished = false;
+                redraw();
+                updateUI();
+            }
+        }
+
+        function finishEarly() {
+            if (vertebrae.length < 2) {
+                alert('至少需要標註 2 個椎體才能結束');
+                return;
+            }
+            if (currentPoints.length > 0) {
+                if (!confirm('目前有未完成的標註點，確定要捨棄並結束嗎？')) return;
+                currentPoints = [];
+            }
+            annotationFinished = true;
+            redraw();
+            updateUI();
+        }
+
         // ==================== 繪製 ====================
         function redraw() {
-            if (!originalImage) return;
-            
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // 繪製影像
-            if (showEdge && edgeImage) {
-                ctx.drawImage(edgeImage, 0, 0);
-            } else {
-                ctx.drawImage(originalImage, 0, 0);
-            }
-            
-            // 繪製已完成的椎間隙
-            vertebrae.forEach((v, idx) => {
-                // 下終板（紅線）
-                drawLine(v.lowerEndplate[0], v.lowerEndplate[1], '#ff0000', 3);
-                // 上終板（藍線）
-                drawLine(v.upperEndplate[0], v.upperEndplate[1], '#0000ff', 3);
-                
-                // 標籤
-                const centerX = (v.lowerEndplate[0].x + v.upperEndplate[1].x) / 2;
-                const centerY = (v.lowerEndplate[0].y + v.upperEndplate[0].y) / 2;
-                
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-                ctx.font = 'bold 20px Arial';
-                const textWidth = ctx.measureText(v.level).width;
-                ctx.fillRect(centerX - textWidth/2 - 10, centerY - 15, textWidth + 20, 30);
-                
-                ctx.strokeStyle = '#333';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(centerX - textWidth/2 - 10, centerY - 15, textWidth + 20, 30);
-                
-                ctx.fillStyle = '#000';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(v.level, centerX, centerY);
-            });
-            
-            // 繪製當前點
-            currentPoints.forEach((p, idx) => {
-                const color = idx < 2 ? '#ff0000' : '#0000ff';
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
-                ctx.fill();
-                
-                // 點序號
+            if (!originalImage) {
+                ctx.fillStyle = '#2c3e50';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.fillStyle = '#fff';
-                ctx.font = 'bold 12px Arial';
+                ctx.font = '20px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('請載入或貼上脊椎 X 光影像', canvas.width/2, canvas.height/2);
+                return;
+            }
+
+            ctx.save();
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.translate(panX, panY);
+            ctx.scale(zoom, zoom);
+
+            const img = (contrastEnhanced && processedImage) ? processedImage : originalImage;
+            ctx.drawImage(img, 0, 0);
+
+            // 繪製已完成的椎體
+            vertebrae.forEach((v, idx) => {
+                const isAbnormal = !v.boundaryType && checkVertebraAbnormal(v);
+                const color = v.boundaryType ? COLORS.boundaryVertebra :
+                              isAbnormal ? COLORS.abnormalVertebra : COLORS.completedVertebra;
+                drawVertebra(v, color, idx);
+            });
+
+            // 繪製當前點
+            const nextName = getNextVertebraName();
+            const labels = nextName ? getPointLabelsForVertebra(nextName) : [];
+            currentPoints.forEach((p, idx) => {
+                const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4];
+                drawPoint(p, colors[idx], idx + 1);
+                if (idx > 0) drawLine(currentPoints[idx-1], p, '#ffffff', 2);
+            });
+
+            // 預覽閉合線
+            const reqPts = nextName ? getRequiredPoints(nextName) : 4;
+            if (currentPoints.length === reqPts - 1 && reqPts === 4) {
+                ctx.setLineDash([5, 5]);
+                drawLine(currentPoints[currentPoints.length - 1], currentPoints[0], '#ffffff', 1);
+                ctx.setLineDash([]);
+            }
+
+            ctx.restore();
+        }
+
+        function drawVertebra(v, color, index) {
+            const pts = v.points;
+
+            if (v.boundaryType) {
+                // 邊界椎體：只畫一條終板線
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3 / zoom;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                ctx.lineTo(pts[1].x, pts[1].y);
+                ctx.stroke();
+
+                // 標記前緣和後緣端點
+                drawPoint(pts[0], COLORS.point1, null, 5 / zoom); // 前
+                drawPoint(pts[1], COLORS.point2, null, 5 / zoom); // 後
+
+                // 標籤
+                const cx = (pts[0].x + pts[1].x) / 2;
+                const cy = (pts[0].y + pts[1].y) / 2;
+                const offset = v.boundaryType === 'upper' ? -20 : 20;
+                drawLabel(v.name, cx, cy + offset / zoom);
+            } else {
+                // 完整椎體
+                ctx.fillStyle = color + '30';
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                pts.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.closePath();
+                ctx.fill();
+
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2 / zoom;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                pts.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.closePath();
+                ctx.stroke();
+
+                // 前緣
+                ctx.strokeStyle = '#ff6b6b';
+                ctx.lineWidth = 3 / zoom;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.stroke();
+
+                // 後緣
+                ctx.strokeStyle = '#339af0';
+                ctx.beginPath();
+                ctx.moveTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[2].x, pts[2].y);
+                ctx.stroke();
+
+                pts.forEach((p, i) => {
+                    const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4];
+                    drawPoint(p, colors[i], null, 4 / zoom);
+                });
+
+                const centerX = (pts[0].x + pts[2].x) / 2;
+                const centerY = (pts[0].y + pts[2].y) / 2;
+                drawLabel(v.name, centerX, centerY);
+            }
+        }
+
+        function drawLabel(text, x, y) {
+            const fontSize = Math.max(12, 16 / zoom);
+            ctx.font = `bold ${fontSize}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            const textWidth = ctx.measureText(text).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(x - textWidth/2 - 4, y - fontSize/2 - 2, textWidth + 8, fontSize + 4);
+            ctx.fillStyle = '#fff';
+            ctx.fillText(text, x, y);
+        }
+
+        function drawPoint(p, color, label, radius = 6) {
+            const r = (typeof radius === 'number' ? radius : 6) / (radius > 1 ? 1 : zoom);
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.5 / zoom;
+            ctx.stroke();
+
+            if (label) {
+                ctx.fillStyle = '#fff';
+                ctx.font = `bold ${10/zoom}px Arial`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillText((idx + 1).toString(), p.x, p.y);
-            });
+                ctx.fillText(label.toString(), p.x, p.y);
+            }
         }
-        
+
         function drawLine(p1, p2, color, width) {
             ctx.strokeStyle = color;
-            ctx.lineWidth = width;
+            ctx.lineWidth = width / zoom;
             ctx.beginPath();
             ctx.moveTo(p1.x, p1.y);
             ctx.lineTo(p2.x, p2.y);
             ctx.stroke();
         }
-        
+
         // ==================== 分析計算 ====================
-        function calculateAngle(p1, p2, p3, p4) {
-            const angle1 = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-            const angle2 = Math.atan2(p4.y - p3.y, p4.x - p3.x);
-            let diff = Math.abs(angle1 - angle2) * 180 / Math.PI;
-            if (diff > 90) diff = 180 - diff;
-            return diff;
+        function checkVertebraAbnormal(v) {
+            // 回傳異常類型: false / 'anteriorWedging' / 'crushDeformity'
+            if (!v.anteriorHeight || !v.posteriorHeight) return false;
+            if (v.anteriorHeight < v.posteriorHeight * 0.75) return 'anteriorWedging';
+            if (v.anteriorHeight > v.posteriorHeight * 1.25) return 'crushDeformity';
+            return false;
         }
-        
-        function calculateDiscHeight(lowerEndplate, upperEndplate) {
-            // 計算椎間盤高度（前、中、後）
-            const anterior = Math.abs(upperEndplate[0].y - lowerEndplate[0].y);
-            const posterior = Math.abs(upperEndplate[1].y - lowerEndplate[1].y);
-            const middle = (anterior + posterior) / 2;
-            return {anterior, middle, posterior};
+
+        function getAnatomicalOrder() {
+            // 將椎體按解剖學由上到下排列
+            const config = CONFIG[spineType];
+            const order = config.vertebrae;
+            return [...vertebrae].sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
         }
-        
-        function detectListhesis(vertebrae) {
-            // 檢測滑脫
+
+        function getDiscLevel(upperName, lowerName) {
+            // 永遠按解剖學順序命名：上椎體/下椎體
+            const config = CONFIG[spineType];
+            const order = config.vertebrae;
+            const iUpper = order.indexOf(upperName);
+            const iLower = order.indexOf(lowerName);
+            if (iUpper < iLower) return `${upperName}/${lowerName}`;
+            return `${lowerName}/${upperName}`;
+        }
+
+        function calculateDiscMetrics(upperV, lowerV) {
+            // 上椎體的下終板 vs 下椎體的上終板
+            const upperLower = getLowerEndplate(upperV); // [anterior, posterior]
+            const lowerUpper = getUpperEndplate(lowerV); // [anterior, posterior]
+
+            if (!upperLower || !lowerUpper) return null;
+
+            const anteriorHeight = Math.sqrt(
+                Math.pow(lowerUpper[0].x - upperLower[0].x, 2) +
+                Math.pow(lowerUpper[0].y - upperLower[0].y, 2)
+            );
+
+            const posteriorHeight = Math.sqrt(
+                Math.pow(lowerUpper[1].x - upperLower[1].x, 2) +
+                Math.pow(lowerUpper[1].y - upperLower[1].y, 2)
+            );
+
+            const middleHeight = (anteriorHeight + posteriorHeight) / 2;
+
+            const upperAngle = Math.atan2(
+                upperLower[1].y - upperLower[0].y,
+                upperLower[1].x - upperLower[0].x
+            );
+            const lowerAngle = Math.atan2(
+                lowerUpper[1].y - lowerUpper[0].y,
+                lowerUpper[1].x - lowerUpper[0].x
+            );
+            let wedgeAngle = Math.abs(upperAngle - lowerAngle) * 180 / Math.PI;
+            if (wedgeAngle > 90) wedgeAngle = 180 - wedgeAngle;
+
+            return { anteriorHeight, posteriorHeight, middleHeight, wedgeAngle };
+        }
+
+        function checkListhesis() {
             const results = [];
-            for (let i = 0; i < vertebrae.length - 1; i++) {
-                const current = vertebrae[i];
-                const next = vertebrae[i + 1];
-                
-                // 比較後緣位置
-                const currentPost = current.lowerEndplate[1].x;
-                const nextPost = next.upperEndplate[1].x;
-                const shift = currentPost - nextPost;
-                
-                // 計算椎體寬度作為參考
-                const width = Math.abs(current.lowerEndplate[1].x - current.lowerEndplate[0].x);
-                const shiftPercent = (shift / width) * 100;
-                
-                if (Math.abs(shiftPercent) > 5) {
+            const ordered = getAnatomicalOrder();
+            // 只取有後緣資訊的椎體
+            const withPosterior = ordered.filter(v => {
+                const p = getPosteriorPoints(v);
+                return p.top || p.bottom;
+            });
+
+            if (withPosterior.length < 3) return results;
+
+            // 取後緣代表點：完整椎體用中點，邊界椎體用有的那個點
+            const posteriorPts = withPosterior.map(v => {
+                const p = getPosteriorPoints(v);
+                let x, y;
+                if (p.top && p.bottom) {
+                    x = (p.top.x + p.bottom.x) / 2;
+                    y = (p.top.y + p.bottom.y) / 2;
+                } else if (p.top) {
+                    x = p.top.x; y = p.top.y;
+                } else {
+                    x = p.bottom.x; y = p.bottom.y;
+                }
+                return { name: v.name, x, y, v };
+            });
+
+            const first = posteriorPts[0];
+            const last = posteriorPts[posteriorPts.length - 1];
+            const lineLen = Math.sqrt(Math.pow(last.x - first.x, 2) + Math.pow(last.y - first.y, 2));
+            if (lineLen === 0) return results;
+
+            for (let i = 1; i < posteriorPts.length - 1; i++) {
+                const p = posteriorPts[i];
+                const distance = Math.abs(
+                    (last.y - first.y) * p.x - (last.x - first.x) * p.y +
+                    last.x * first.y - last.y * first.x
+                ) / lineLen;
+
+                // 使用上終板寬度作為參考
+                const upper = getUpperEndplate(p.v);
+                if (!upper) continue;
+                const width = Math.abs(upper[1].x - upper[0].x);
+                if (width === 0) continue;
+
+                const shiftPercent = (distance / width) * 100;
+
+                if (shiftPercent > 5) {
+                    const dy = last.y - first.y;
+                    const expectedX = dy !== 0 ?
+                        first.x + (p.y - first.y) * (last.x - first.x) / dy :
+                        first.x;
+                    const type = p.x > expectedX ? 'Retrolisthesis' : 'Anterolisthesis';
+
                     results.push({
-                        level: `${current.level} → ${next.level}`,
-                        type: shift > 0 ? 'Anterolisthesis' : 'Retrolisthesis',
-                        shift: Math.abs(shiftPercent).toFixed(1) + '%'
+                        level: p.name,
+                        type: type,
+                        shift: shiftPercent.toFixed(1)
                     });
                 }
             }
             return results;
         }
-        
-        function detectDiscNarrowing(vertebrae) {
-            // 檢測椎間盤狹窄
+
+        function checkHeightProgression() {
             const results = [];
-            const heights = [];
-            
-            vertebrae.forEach(v => {
-                const h = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
-                heights.push({level: v.level, height: h.middle});
-            });
-            
-            // L4/5 應該最高
-            if (heights.length >= 4) {
-                const l45Index = heights.findIndex(h => h.level.includes('L4/L5'));
-                if (l45Index >= 0) {
-                    const l45Height = heights[l45Index].height;
-                    
-                    heights.forEach((h, idx) => {
-                        if (idx !== l45Index && idx < l45Index) {
-                            if (h.height > l45Height * 1.1) {
+            const ordered = getAnatomicalOrder();
+            const discHeights = [];
+
+            for (let i = 0; i < ordered.length - 1; i++) {
+                const metrics = calculateDiscMetrics(ordered[i], ordered[i + 1]);
+                if (!metrics) continue;
+                const level = getDiscLevel(ordered[i].name, ordered[i + 1].name);
+                discHeights.push({ level, height: metrics.middleHeight });
+            }
+
+            if (discHeights.length < 2) return results;
+
+            const config = CONFIG[spineType];
+
+            if (config.expectedHeightPattern === 'L4L5_highest') {
+                const l45 = discHeights.find(d => d.level === 'L4/L5');
+
+                if (l45) {
+                    discHeights.forEach(d => {
+                        if (d.level !== 'L4/L5' && d.level !== 'L5/S1') {
+                            if (d.height > l45.height * 1.1) {
                                 results.push({
-                                    level: h.level,
-                                    issue: '椎間盤高度異常（高於L4/5）'
+                                    level: d.level,
+                                    issue: `椎間盤高度異常偏高（高於 L4/L5）`,
+                                    severity: 'warning'
                                 });
                             }
                         }
                     });
                 }
-            }
-            
-            // 檢查相鄰高度差異
-            for (let i = 0; i < heights.length - 1; i++) {
-                const ratio = heights[i].height / heights[i + 1].height;
-                if (ratio < 0.6 || ratio > 1.67) {
-                    results.push({
-                        level: heights[i].level,
-                        issue: `與下一節段高度差異過大 (${ratio.toFixed(2)}x)`
-                    });
+
+                for (let i = 0; i < discHeights.length - 1; i++) {
+                    if (discHeights[i + 1].level === 'L5/S1') continue;
+                    if (discHeights[i].height > discHeights[i + 1].height * 1.3) {
+                        results.push({
+                            level: discHeights[i].level,
+                            issue: `椎間盤高度遞進異常`,
+                            severity: 'warning'
+                        });
+                    }
+                }
+            } else if (config.expectedHeightPattern === 'increasing') {
+                for (let i = 0; i < discHeights.length - 1; i++) {
+                    if (discHeights[i].height > discHeights[i + 1].height * 1.2) {
+                        results.push({
+                            level: discHeights[i].level,
+                            issue: `椎間盤高度遞進異常（應越來越高）`,
+                            severity: 'warning'
+                        });
+                    }
                 }
             }
-            
             return results;
         }
-        
-        function buildVertebraEdges(vertebrae) {
-            // 模仿 slicer_codes.py 的 _build_vertebra_edges
-            const edges = {};
-            
-            for (let i = 0; i < vertebrae.length - 1; i++) {
-                const current = vertebrae[i];
-                const next = vertebrae[i + 1];
-                
-                // 提取椎體名稱（如 L4）
-                const vertebraName = current.level.split('/')[1];
-                
-                // 前緣：x較小的點
-                const upperAnt = current.upperEndplate[0].x < current.upperEndplate[1].x ? 
-                                current.upperEndplate[0] : current.upperEndplate[1];
-                const lowerAnt = next.lowerEndplate[0].x < next.lowerEndplate[1].x ? 
-                                next.lowerEndplate[0] : next.lowerEndplate[1];
-                
-                // 後緣：x較大的點
-                const upperPost = current.upperEndplate[0].x > current.upperEndplate[1].x ? 
-                                 current.upperEndplate[0] : current.upperEndplate[1];
-                const lowerPost = next.lowerEndplate[0].x > next.lowerEndplate[1].x ? 
-                                 next.lowerEndplate[0] : next.lowerEndplate[1];
-                
-                edges[vertebraName] = {
-                    anterior: [upperAnt, lowerAnt],
-                    posterior: [upperPost, lowerPost]
-                };
-            }
-            
-            return edges;
-        }
-        
+
         // ==================== UI 更新 ====================
-        function updateProgress() {
-            const total = 5; // L5/S1 到 L1/L2
-            const current = vertebrae.length;
-            const remaining = currentPoints.length;
-            
-            let text = `已完成 ${current}/${total} 個椎間隙`;
-            if (remaining > 0) {
-                text += ` (當前: ${remaining}/4 點)`;
+        function updateUI() {
+            const config = CONFIG[spineType];
+            const total = config.vertebrae.length;
+            const completed = vertebrae.length;
+
+            document.getElementById('progressCount').textContent = completed;
+            document.getElementById('totalCount').textContent = total;
+            document.getElementById('progressFill').style.width = `${(completed / total) * 100}%`;
+
+            // 顯示/隱藏「結束標註」按鈕：至少 2 個椎體且尚未結束
+            const btnFinish = document.getElementById('btnFinishEarly');
+            if (btnFinish) {
+                btnFinish.style.display = (completed >= 2 && !annotationFinished && completed < total) ? '' : 'none';
             }
-            
-            document.getElementById('progressText').textContent = text;
+
+            updateCurrentTask();
+            updateVertebraList();
+            updateDiscAnalysis();
+            updateAbnormalities();
         }
-        
-        function updateAnalysis() {
-            // 更新測量結果
-            let html = '';
-            vertebrae.forEach(v => {
-                const angle = calculateAngle(
-                    v.lowerEndplate[0], v.lowerEndplate[1],
-                    v.upperEndplate[0], v.upperEndplate[1]
-                );
-                const height = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
-                
-                html += `
-                    <div class="measurement-card">
-                        <div class="level-label">${v.level}</div>
-                        <div class="metric">
-                            <span class="metric-label">角度:</span>
-                            <span class="metric-value">${angle.toFixed(1)}°</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-label">椎間盤高度:</span>
-                            <span class="metric-value">${height.middle.toFixed(1)} px</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-label">前/後高度:</span>
-                            <span class="metric-value">${height.anterior.toFixed(1)} / ${height.posterior.toFixed(1)}</span>
-                        </div>
-                    </div>
-                `;
-            });
-            document.getElementById('measurementsList').innerHTML = html || '<p style="color: #6c757d;">尚無測量數據</p>';
-            
-            // 更新異常檢測
-            let abnormalHtml = '';
-            
-            if (vertebrae.length >= 2) {
-                const listhesis = detectListhesis(vertebrae);
-                const narrowing = detectDiscNarrowing(vertebrae);
-                
-                listhesis.forEach(l => {
-                    abnormalHtml += `
-                        <div class="measurement-card warning">
-                            <strong>⚠️ ${l.type}</strong><br>
-                            ${l.level}: 滑脫 ${l.shift}
-                        </div>
-                    `;
-                });
-                
-                narrowing.forEach(n => {
-                    abnormalHtml += `
-                        <div class="measurement-card warning">
-                            <strong>⚠️ ${n.level}</strong><br>
-                            ${n.issue}
-                        </div>
-                    `;
-                });
-            }
-            
-            document.getElementById('abnormalitiesList').innerHTML = abnormalHtml || 
-                '<p style="color: #28a745;">✅ 未檢測到明顯異常</p>';
-        }
-        
-        // ==================== 操作功能 ====================
-        function undoLastPoint() {
-            if (currentPoints.length > 0) {
-                currentPoints.pop();
-            } else if (vertebrae.length > 0) {
-                vertebrae.pop();
-                updateAnalysis();
-            }
-            redraw();
-            updateProgress();
-        }
-        
-        function clearAll() {
-            if (confirm('確定要清除所有標記嗎？')) {
-                currentPoints = [];
-                vertebrae = [];
-                redraw();
-                updateProgress();
-                updateAnalysis();
-            }
-        }
-        
-        // ==================== 匯出功能 ====================
-        function exportTrainingData() {
-            if (!originalImage || vertebrae.length === 0) {
-                alert('❌ 請先完成標註！');
+
+        function updateCurrentTask() {
+            const taskText = document.getElementById('taskText');
+            const pointGuide = document.getElementById('pointGuide');
+
+            if (!originalImage) {
+                taskText.textContent = '請先載入或貼上影像';
+                pointGuide.style.display = 'none';
                 return;
             }
-            
-            // 建立 JSON 數據（模仿 slicer_codes.py 格式）
-            const measurements = vertebrae.map(v => {
-                const angle = calculateAngle(
-                    v.lowerEndplate[0], v.lowerEndplate[1],
-                    v.upperEndplate[0], v.upperEndplate[1]
-                );
-                
-                return {
-                    level: v.level,
-                    angle: parseFloat(angle.toFixed(1)),
-                    angle_raw: parseFloat(angle.toFixed(1)),
-                    confidence: 0.95,
-                    measurement_method: "manual_web",
-                    lowerEndplate: [
-                        {x: v.lowerEndplate[0].x, y: v.lowerEndplate[0].y},
-                        {x: v.lowerEndplate[1].x, y: v.lowerEndplate[1].y}
-                    ],
-                    upperEndplate: [
-                        {x: v.upperEndplate[0].x, y: v.upperEndplate[0].y},
-                        {x: v.upperEndplate[1].x, y: v.upperEndplate[1].y}
-                    ]
-                };
+
+            const nextName = getNextVertebraName();
+            if (!nextName) {
+                taskText.textContent = '✅ 標註完成！可以匯出數據';
+                pointGuide.style.display = 'none';
+                return;
+            }
+
+            const required = getRequiredPoints(nextName);
+            const labels = getPointLabelsForVertebra(nextName);
+            const bType = isBoundary(nextName);
+            const bHint = bType === 'upper' ? '(上終板)' :
+                          bType === 'lower' ? '(下終板)' : '';
+
+            taskText.textContent = `標註 ${nextName} ${bHint} (${currentPoints.length}/${required} 點)`;
+            pointGuide.style.display = 'grid';
+
+            // 更新點引導 — 動態顯示
+            const guideContainer = document.getElementById('pointGuide');
+            let guideHtml = '';
+            labels.forEach((label, i) => {
+                const isActive = i === currentPoints.length;
+                const colorClasses = ['point-1', 'point-2', 'point-3', 'point-4'];
+                guideHtml += `<div class="point-item ${colorClasses[i]} ${isActive ? 'active' : ''}">
+                    ${i + 1} ${label}
+                </div>`;
             });
-            
-            const vertebraEdges = buildVertebraEdges(vertebrae);
-            
-            const jsonData = {
-                patient_id: "",
-                study_id: "",
-                study_date: new Date().toISOString().split('T')[0],
-                spine_type: "L",
-                image_type: "neutral",
-                image_path: "",
-                image_dimensions: {
+            guideContainer.innerHTML = guideHtml;
+        }
+
+        function updateVertebraList() {
+            const list = document.getElementById('vertebraList');
+            const config = CONFIG[spineType];
+
+            if (vertebrae.length === 0) {
+                list.innerHTML = '<div style="color: #999; font-size: 12px; padding: 10px;">尚未標註椎體</div>';
+                return;
+            }
+
+            let html = '';
+            vertebrae.forEach((v, idx) => {
+                const abnormalType = !v.boundaryType && checkVertebraAbnormal(v);
+                const isBound = !!v.boundaryType;
+                const statusClass = abnormalType ? 'warning' : 'complete';
+                const abnormalLabel = abnormalType === 'anteriorWedging' ? '⚠️ 前緣壓迫' :
+                                     abnormalType === 'crushDeformity' ? '⚠️ Crush' : '';
+                const statusText = isBound ? (v.boundaryType === 'upper' ? '上終板' : '下終板') :
+                                   abnormalType ? abnormalLabel : '✓ 完成';
+
+                // 選單包含所有椎體名稱
+                const allNames = config.vertebrae;
+
+                html += `
+                    <div class="vertebra-card">
+                        <div class="vertebra-header" onclick="toggleVertebraBody(${idx})">
+                            <div class="vertebra-name">
+                                <select onchange="changeVertebraName(${idx}, this.value)" onclick="event.stopPropagation()">
+                                    ${allNames.map(name =>
+                                        `<option value="${name}" ${v.name === name ? 'selected' : ''}>${name}</option>`
+                                    ).join('')}
+                                </select>
+                            </div>
+                            <span class="vertebra-status ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="vertebra-body" id="vertebra-body-${idx}">`;
+
+                if (!isBound) {
+                    html += `
+                            <div class="metric-row">
+                                <span class="metric-label">前緣高度:</span>
+                                <span class="metric-value">${v.anteriorHeight?.toFixed(1) || '-'} px</span>
+                            </div>
+                            <div class="metric-row">
+                                <span class="metric-label">後緣高度:</span>
+                                <span class="metric-value">${v.posteriorHeight?.toFixed(1) || '-'} px</span>
+                            </div>
+                            <div class="metric-row">
+                                <span class="metric-label">前/後比例:</span>
+                                <span class="metric-value ${isAbnormal ? 'danger' : ''}">${v.anteriorHeight && v.posteriorHeight ? (v.anteriorHeight / v.posteriorHeight * 100).toFixed(0) + '%' : '-'}</span>
+                            </div>
+                            ${abnormalType === 'anteriorWedging' ? '<div style="color: #dc3545; font-size: 11px; margin-top: 5px;">⚠️ 疑似前緣壓迫性骨折 (Anterior Wedging)</div>' : ''}
+                            ${abnormalType === 'crushDeformity' ? '<div style="color: #dc3545; font-size: 11px; margin-top: 5px;">⚠️ 疑似 Crush Deformity Compression Fracture</div>' : ''}`;
+                } else {
+                    html += `<div style="color: #6c757d; font-size: 11px;">邊界椎體 — 僅標記${v.boundaryType === 'upper' ? '上' : '下'}終板</div>`;
+                }
+
+                html += `</div></div>`;
+            });
+
+            list.innerHTML = html;
+        }
+
+        function toggleVertebraBody(idx) {
+            document.getElementById(`vertebra-body-${idx}`).classList.toggle('show');
+        }
+
+        function changeVertebraName(idx, newName) {
+            const oldBoundary = isBoundary(vertebrae[idx].name);
+            const newBoundary = isBoundary(newName);
+
+            // 如果邊界類型改變（2點 ↔ 4點），提醒使用者
+            if (oldBoundary !== newBoundary) {
+                alert(`注意：${newName} ${newBoundary ? '是邊界椎體（' + (newBoundary === 'upper' ? '上終板' : '下終板') + '）' : '是完整椎體（4點）'}。\n點數不匹配，建議刪除後重新標註。`);
+            }
+
+            vertebrae[idx].name = newName;
+            vertebrae[idx].boundaryType = newBoundary;
+            updateUI();
+            redraw();
+        }
+
+        function updateDiscAnalysis() {
+            const container = document.getElementById('discAnalysis');
+            const ordered = getAnatomicalOrder();
+
+            if (ordered.length < 2) {
+                container.innerHTML = '<div style="color: #999; font-size: 12px; padding: 10px;">需要至少 2 個椎體才能分析椎間盤</div>';
+                return;
+            }
+
+            let html = '';
+            for (let i = 0; i < ordered.length - 1; i++) {
+                const metrics = calculateDiscMetrics(ordered[i], ordered[i + 1]);
+                if (!metrics) continue;
+
+                const level = getDiscLevel(ordered[i].name, ordered[i + 1].name);
+                const isNarrow = metrics.middleHeight < 20;
+
+                html += `
+                    <div class="disc-card ${isNarrow ? 'abnormal' : ''}">
+                        <div class="disc-header">💿 ${level}</div>
+                        <div class="disc-metrics">
+                            <div class="disc-metric">前方: ${metrics.anteriorHeight.toFixed(1)} px</div>
+                            <div class="disc-metric">後方: ${metrics.posteriorHeight.toFixed(1)} px</div>
+                            <div class="disc-metric">平均: ${metrics.middleHeight.toFixed(1)} px</div>
+                            <div class="disc-metric">Wedge: ${metrics.wedgeAngle.toFixed(1)}°</div>
+                        </div>
+                    </div>`;
+            }
+
+            container.innerHTML = html || '<div style="color: #999; font-size: 12px; padding: 10px;">無法計算椎間盤（缺少相鄰終板）</div>';
+        }
+
+        function updateAbnormalities() {
+            const container = document.getElementById('abnormalities');
+            const abnormalities = [];
+
+            // 1. 壓迫性骨折
+            vertebrae.forEach(v => {
+                const abnType = !v.boundaryType && checkVertebraAbnormal(v);
+                if (abnType === 'anteriorWedging') {
+                    abnormalities.push({
+                        type: 'danger',
+                        title: `${v.name} Anterior Wedging Fracture`,
+                        detail: `前緣/後緣比例: ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}% (< 75%)`
+                    });
+                } else if (abnType === 'crushDeformity') {
+                    abnormalities.push({
+                        type: 'danger',
+                        title: `${v.name} Crush Deformity Fracture`,
+                        detail: `前緣/後緣比例: ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}% (> 125%)`
+                    });
+                }
+            });
+
+            // 2. Listhesis
+            checkListhesis().forEach(l => {
+                abnormalities.push({
+                    type: 'danger',
+                    title: `${l.level} ${l.type}`,
+                    detail: `後緣偏移: ${l.shift}%`
+                });
+            });
+
+            // 3. 高度遞進
+            checkHeightProgression().forEach(h => {
+                abnormalities.push({ type: 'warning', title: h.level, detail: h.issue });
+            });
+
+            if (abnormalities.length === 0) {
+                container.innerHTML = '<div style="color: #27ae60; font-size: 12px; padding: 10px;">✅ 未檢測到明顯異常</div>';
+                return;
+            }
+
+            container.innerHTML = abnormalities.map(a => `
+                <div class="abnormality-card ${a.type}">
+                    <strong>⚠️ ${a.title}</strong><br>
+                    <span style="font-size: 11px;">${a.detail}</span>
+                </div>`).join('');
+        }
+
+        // ==================== 匯出 ====================
+        function exportData() {
+            if (vertebrae.length === 0) { alert('請先完成標註'); return; }
+
+            const ordered = getAnatomicalOrder();
+
+            // 計算椎間盤
+            const discData = [];
+            for (let i = 0; i < ordered.length - 1; i++) {
+                const metrics = calculateDiscMetrics(ordered[i], ordered[i + 1]);
+                if (!metrics) continue;
+
+                const level = getDiscLevel(ordered[i].name, ordered[i + 1].name);
+                const upperLower = getLowerEndplate(ordered[i]);
+                const lowerUpper = getUpperEndplate(ordered[i + 1]);
+
+                discData.push({
+                    level,
+                    upperEndplate: upperLower,
+                    lowerEndplate: lowerUpper,
+                    anteriorHeight: metrics.anteriorHeight,
+                    posteriorHeight: metrics.posteriorHeight,
+                    middleHeight: metrics.middleHeight,
+                    wedgeAngle: metrics.wedgeAngle
+                });
+            }
+
+            const data = {
+                version: "2.1",
+                exportDate: new Date().toISOString(),
+                spineType: spineType,
+                imageInfo: originalImage ? {
                     width: originalImage.width,
                     height: originalImage.height
-                },
-                annotator: {
-                    name: "",
-                    id: "",
-                    specialty: "",
-                    experience_years: null
-                },
-                annotation_date: new Date().toISOString(),
-                measurements: measurements,
-                vertebra_edges: vertebraEdges,
-                clinical_notes: {
-                    original_report: ""
-                },
-                surgery_info: {
-                    surgery_done: false
+                } : null,
+                vertebrae: ordered.map(v => {
+                    const entry = {
+                        name: v.name,
+                        boundaryType: v.boundaryType || null
+                    };
+                    if (v.boundaryType === 'upper') {
+                        entry.points = {
+                            anteriorSuperior: v.points[0],
+                            posteriorSuperior: v.points[1]
+                        };
+                    } else if (v.boundaryType === 'lower') {
+                        entry.points = {
+                            anteriorInferior: v.points[0],
+                            posteriorInferior: v.points[1]
+                        };
+                    } else {
+                        entry.points = {
+                            anteriorSuperior: v.points[0],
+                            posteriorSuperior: v.points[1],
+                            posteriorInferior: v.points[2],
+                            anteriorInferior: v.points[3]
+                        };
+                        entry.anteriorHeight = v.anteriorHeight;
+                        entry.posteriorHeight = v.posteriorHeight;
+                        const fractureType = checkVertebraAbnormal(v);
+                        entry.anteriorWedgingFracture = fractureType === 'anteriorWedging';
+                        entry.crushDeformityFracture = fractureType === 'crushDeformity';
+                    }
+                    return entry;
+                }),
+                discs: discData,
+                abnormalities: {
+                    compressionFractures: vertebrae
+                        .filter(v => !v.boundaryType && checkVertebraAbnormal(v))
+                        .map(v => ({
+                            name: v.name,
+                            type: checkVertebraAbnormal(v) // 'anteriorWedging' or 'crushDeformity'
+                        })),
+                    listhesis: checkListhesis(),
+                    heightProgressionIssues: checkHeightProgression()
                 }
             };
-            
-            // 下載 JSON
-            const jsonBlob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
-            const jsonUrl = URL.createObjectURL(jsonBlob);
-            const jsonLink = document.createElement('a');
-            const timestamp = new Date().getTime();
-            jsonLink.href = jsonUrl;
-            jsonLink.download = `spine_annotation_${timestamp}.json`;
-            jsonLink.click();
-            URL.revokeObjectURL(jsonUrl);
-            
-            // 下載影像
-            canvas.toBlob(blob => {
-                const imgUrl = URL.createObjectURL(blob);
-                const imgLink = document.createElement('a');
-                imgLink.href = imgUrl;
-                imgLink.download = `spine_image_${timestamp}.png`;
-                imgLink.click();
-                URL.revokeObjectURL(imgUrl);
-            });
-            
-            alert('✅ 已匯出 JSON 和影像檔案！\n請將這些檔案放入訓練數據資料夾。');
+
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `spine_annotation_${spineType}_${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
         }
-        
-        function copyResults() {
-            let report = '脊椎終板標註結果\n================\n\n';
-            
-            vertebrae.forEach(v => {
-                const angle = calculateAngle(
-                    v.lowerEndplate[0], v.lowerEndplate[1],
-                    v.upperEndplate[0], v.upperEndplate[1]
-                );
-                const height = calculateDiscHeight(v.lowerEndplate, v.upperEndplate);
-                
-                report += `${v.level}:\n`;
-                report += `  角度: ${angle.toFixed(1)}°\n`;
-                report += `  椎間盤高度: ${height.middle.toFixed(1)} px\n`;
-                report += `  前/後高度: ${height.anterior.toFixed(1)} / ${height.posterior.toFixed(1)}\n\n`;
-            });
-            
-            if (vertebrae.length >= 2) {
-                const listhesis = detectListhesis(vertebrae);
-                const narrowing = detectDiscNarrowing(vertebrae);
-                
-                if (listhesis.length > 0 || narrowing.length > 0) {
-                    report += '異常檢測:\n';
-                    listhesis.forEach(l => {
-                        report += `  ⚠️ ${l.level}: ${l.type} ${l.shift}\n`;
-                    });
-                    narrowing.forEach(n => {
-                        report += `  ⚠️ ${n.level}: ${n.issue}\n`;
-                    });
+
+        function exportReport() {
+            if (vertebrae.length === 0) { alert('請先完成標註'); return; }
+
+            const ordered = getAnatomicalOrder();
+            let report = `脊椎標註報告\n${'='.repeat(40)}\n\n`;
+            report += `脊椎類型: ${spineType === 'L' ? '腰椎' : '頸椎'}\n`;
+            report += `標註日期: ${new Date().toLocaleString('zh-TW')}\n\n`;
+
+            report += `椎體分析\n${'-'.repeat(30)}\n`;
+            ordered.forEach(v => {
+                if (v.boundaryType) {
+                    report += `${v.name}: 邊界椎體 (${v.boundaryType === 'upper' ? '上終板' : '下終板'})\n`;
                 } else {
-                    report += '✅ 未檢測到明顯異常\n';
+                    const abnormal = checkVertebraAbnormal(v);
+                    report += `${v.name}: 前緣 ${v.anteriorHeight?.toFixed(1)}px / 後緣 ${v.posteriorHeight?.toFixed(1)}px`;
+                    report += ` (${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}%)`;
+                    if (abnormal === 'anteriorWedging') report += ` ⚠️ Anterior Wedging Fracture`;
+                    if (abnormal === 'crushDeformity') report += ` ⚠️ Crush Deformity Fracture`;
+                    report += `\n`;
                 }
+            });
+
+            report += `\n椎間盤分析\n${'-'.repeat(30)}\n`;
+            for (let i = 0; i < ordered.length - 1; i++) {
+                const metrics = calculateDiscMetrics(ordered[i], ordered[i + 1]);
+                if (!metrics) continue;
+                const level = getDiscLevel(ordered[i].name, ordered[i + 1].name);
+                report += `${level}: 高度 ${metrics.middleHeight.toFixed(1)}px, Wedge ${metrics.wedgeAngle.toFixed(1)}°\n`;
             }
-            
-            report += `\n報告時間: ${new Date().toLocaleString('zh-TW')}`;
-            
+
+            const listhesis = checkListhesis();
+            if (listhesis.length > 0) {
+                report += `\n滑脫檢測\n${'-'.repeat(30)}\n`;
+                listhesis.forEach(l => {
+                    report += `${l.level}: ${l.type} (${l.shift}%)\n`;
+                });
+            }
+
             navigator.clipboard.writeText(report).then(() => {
-                alert('✅ 結果已複製到剪貼簿！');
-            }).catch(() => {
-                alert('❌ 複製失敗，請手動複製。');
+                alert('報告已複製到剪貼簿');
             });
         }
     </script>
 </body>
 </html>
-

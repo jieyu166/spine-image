@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-終板檢測數據準備腳本
-Endplate Detection Data Preparation Script
+椎體頂點檢測數據準備腳本 V2.1
+Vertebra Corner Detection Data Preparation Script
 
-處理新的JSON標註格式，準備終板檢測訓練數據
+支援格式:
+- V2.1: 邊界椎體僅需 2 點 (S1/T1=上終板, T12/C2=下終板)
+- V2.0: 每個椎體 4 個頂點 (向下相容)
+- V1.0: 終板格式 (自動轉換)
 """
 
 import os
@@ -14,287 +17,793 @@ import shutil
 from tqdm import tqdm
 import argparse
 
-class EndplateDataPreparer:
-    """終板檢測數據準備器"""
-    
+class VertebraDataPreparer:
+    """椎體頂點檢測數據準備器"""
+
     def __init__(self, input_dir, output_dir):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 創建輸出目錄結構
         (self.output_dir / 'images').mkdir(exist_ok=True)
         (self.output_dir / 'annotations').mkdir(exist_ok=True)
         (self.output_dir / 'visualizations').mkdir(exist_ok=True)
-    
+
     def collect_annotations(self):
         """收集所有標註檔案"""
         print("🔍 收集標註檔案...")
-        
+
         json_files = list(self.input_dir.glob('**/*.json'))
         annotations = []
-        
+
         for json_file in tqdm(json_files, desc="處理JSON檔案"):
+            # 跳過配置檔案和訓練資料
+            if 'training_data' in str(json_file) or 'dataset_info' in json_file.name:
+                continue
+            if 'annotation_template' in json_file.name:
+                continue
+
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                
+
                 # 驗證必要欄位
-                if self.validate_annotation(data):
-                    annotations.append({
-                        'file': json_file,
-                        'data': data
-                    })
+                version = data.get('version', '1.0')
+
+                if version.startswith('2'):
+                    # V2.0 格式（椎體4頂點）
+                    if self.validate_v2_annotation(data):
+                        annotations.append({
+                            'file': json_file,
+                            'data': data,
+                            'format': 'v2'
+                        })
+                    else:
+                        print(f"⚠️ V2格式無效: {json_file}")
                 else:
-                    print(f"⚠️ 跳過無效檔案: {json_file}")
-            
+                    # V1.0 格式（終板格式）- 嘗試轉換
+                    if self.validate_v1_annotation(data):
+                        annotations.append({
+                            'file': json_file,
+                            'data': data,
+                            'format': 'v1'
+                        })
+                    else:
+                        print(f"⚠️ V1格式無效: {json_file}")
+
             except Exception as e:
                 print(f"❌ 讀取檔案失敗 {json_file}: {e}")
-        
+
         print(f"✅ 找到 {len(annotations)} 個有效標註檔案")
         return annotations
-    
-    def validate_annotation(self, data):
-        """驗證標註資料格式"""
+
+    # 邊界椎體定義
+    BOUNDARY_CONFIG = {
+        'L': {'upper': ['S1'], 'lower': ['T12']},   # S1=上終板, T12=下終板
+        'C': {'upper': ['T1'], 'lower': ['C2']},     # T1=上終板, C2=下終板
+    }
+
+    def is_boundary_vertebra(self, name, spine_type, boundary_type=None, points=None):
+        """判斷是否為邊界椎體
+
+        Args:
+            name: 椎體名稱 (如 'S1', 'T12')
+            spine_type: 脊椎類型 ('L' 或 'C')
+            boundary_type: 如果已在 JSON 中指定 (V2.1)，直接使用
+            points: 椎體的 points dict，用於判斷 V2.0 是否有完整 4 點
+
+        Returns:
+            'upper' (僅上終板), 'lower' (僅下終板), 或 None (完整椎體)
+        """
+        # V2.1 明確標記的 boundaryType
+        if boundary_type:
+            return boundary_type
+
+        # 如果有完整 4 點 (V2.0 格式)，即使名稱是邊界椎體也當完整處理
+        if points and isinstance(points, dict):
+            has_all_4 = all(k in points for k in
+                ['anteriorSuperior', 'posteriorSuperior', 'posteriorInferior', 'anteriorInferior'])
+            if has_all_4:
+                return None
+        elif points and isinstance(points, list) and len(points) >= 4:
+            return None
+
+        # 根據名稱和脊椎類型判斷
+        config = self.BOUNDARY_CONFIG.get(spine_type, {})
+        if name in config.get('upper', []):
+            return 'upper'
+        if name in config.get('lower', []):
+            return 'lower'
+        return None
+
+    def validate_v2_annotation(self, data):
+        """驗證 V2.0/V2.1 標註資料格式（椎體頂點）
+
+        V2.0: 每個椎體 4 點
+        V2.1: 邊界椎體可以只有 2 點
+        """
         # 檢查必要欄位
+        if 'vertebrae' not in data:
+            return False
+
+        vertebrae = data['vertebrae']
+        if not isinstance(vertebrae, list) or len(vertebrae) == 0:
+            return False
+
+        spine_type = data.get('spineType', 'L')
+
+        for v in vertebrae:
+            if 'points' not in v:
+                return False
+            points = v['points']
+            name = v.get('name', '')
+            bt = v.get('boundaryType', None)
+            boundary = self.is_boundary_vertebra(name, spine_type, bt, points)
+
+            if isinstance(points, dict):
+                if boundary:
+                    # 邊界椎體只需 2 點
+                    if boundary == 'upper':
+                        required = ['anteriorSuperior', 'posteriorSuperior']
+                    else:
+                        required = ['posteriorInferior', 'anteriorInferior']
+                    if not all(k in points for k in required):
+                        return False
+                else:
+                    # 完整椎體需 4 點
+                    required = ['anteriorSuperior', 'posteriorSuperior',
+                               'posteriorInferior', 'anteriorInferior']
+                    if not all(k in points for k in required):
+                        return False
+            elif isinstance(points, list):
+                if boundary:
+                    if len(points) < 2:
+                        return False
+                else:
+                    if len(points) != 4:
+                        return False
+            else:
+                return False
+
+        return True
+
+    def validate_v1_annotation(self, data):
+        """驗證 V1.0 標註資料格式（終板格式）"""
         required_fields = ['measurements', 'image_dimensions']
-        
+
         for field in required_fields:
             if field not in data:
                 return False
-        
-        # 檢查measurements內容
+
         if not isinstance(data['measurements'], list) or len(data['measurements']) == 0:
             return False
-        
-        # 檢查每個measurement是否包含終板資訊
+
         for m in data['measurements']:
             if 'lowerEndplate' not in m or 'upperEndplate' not in m:
                 return False
             if len(m['lowerEndplate']) < 2 or len(m['upperEndplate']) < 2:
                 return False
-        
+
         return True
-    
+
+    def convert_v1_to_v2(self, v1_data):
+        """將 V1.0 格式轉換為 V2.0 格式"""
+        # V1 格式是以椎間盤為中心，需要重建椎體
+        # 這是一個近似轉換
+
+        measurements = v1_data['measurements']
+        vertebrae = []
+
+        # 從 measurements 提取椎體資訊
+        for i, m in enumerate(measurements):
+            level = m.get('level', f'Level_{i}')
+            upper_name, lower_name = level.split('/')
+
+            upper_endplate = m['upperEndplate']  # 上椎體的下終板
+            lower_endplate = m['lowerEndplate']  # 下椎體的上終板
+
+            # 簡化處理：從終板推算椎體頂點（假設椎體高度約為終板長度的 80%）
+            # 注意：這是近似值，建議使用 V2 格式重新標註
+
+            # 上椎體（如果是第一個測量）
+            if i == 0:
+                # 估算上終板位置
+                width = abs(upper_endplate[1]['x'] - upper_endplate[0]['x'])
+                estimated_height = width * 0.3  # 估算椎體高度
+
+                vertebrae.append({
+                    'name': upper_name,
+                    'points': {
+                        'anteriorSuperior': {
+                            'x': upper_endplate[0]['x'],
+                            'y': upper_endplate[0]['y'] - estimated_height
+                        },
+                        'posteriorSuperior': {
+                            'x': upper_endplate[1]['x'],
+                            'y': upper_endplate[1]['y'] - estimated_height
+                        },
+                        'posteriorInferior': upper_endplate[1],
+                        'anteriorInferior': upper_endplate[0]
+                    },
+                    'source': 'converted_from_v1'
+                })
+
+            # 下椎體
+            width = abs(lower_endplate[1]['x'] - lower_endplate[0]['x'])
+            estimated_height = width * 0.3
+
+            vertebrae.append({
+                'name': lower_name,
+                'points': {
+                    'anteriorSuperior': lower_endplate[0],
+                    'posteriorSuperior': lower_endplate[1],
+                    'posteriorInferior': {
+                        'x': lower_endplate[1]['x'],
+                        'y': lower_endplate[1]['y'] + estimated_height
+                    },
+                    'anteriorInferior': {
+                        'x': lower_endplate[0]['x'],
+                        'y': lower_endplate[0]['y'] + estimated_height
+                    }
+                },
+                'source': 'converted_from_v1'
+            })
+
+        # 去除重複椎體
+        seen = set()
+        unique_vertebrae = []
+        for v in vertebrae:
+            if v['name'] not in seen:
+                seen.add(v['name'])
+                unique_vertebrae.append(v)
+
+        return {
+            'version': '2.0',
+            'spineType': v1_data.get('spine_type', 'L'),
+            'imageInfo': v1_data.get('image_dimensions', {}),
+            'vertebrae': unique_vertebrae,
+            'converted_from': 'v1'
+        }
+
+    def calculate_vertebra_metrics(self, vertebra, spine_type='L'):
+        """計算椎體指標
+
+        邊界椎體 (S1/T1/T12/C2) 只有 2 點，無法計算高度比，
+        返回 None 用於高度和骨折判斷。
+        """
+        points = vertebra['points']
+        name = vertebra.get('name', '')
+        bt = vertebra.get('boundaryType', None)
+        boundary = self.is_boundary_vertebra(name, spine_type, bt, points)
+
+        if boundary:
+            # 邊界椎體只有 2 點，無法計算前後緣高度
+            return {
+                'anteriorHeight': None,
+                'posteriorHeight': None,
+                'heightRatio': None,
+                'compressionFracture': False,
+                'boundary': boundary
+            }
+
+        # 完整椎體 - 4 點
+        if isinstance(points, dict):
+            ant_sup = points['anteriorSuperior']
+            post_sup = points['posteriorSuperior']
+            post_inf = points['posteriorInferior']
+            ant_inf = points['anteriorInferior']
+        else:
+            ant_sup, post_sup, post_inf, ant_inf = points
+
+        # 前緣高度
+        anterior_height = np.sqrt(
+            (ant_inf['x'] - ant_sup['x'])**2 +
+            (ant_inf['y'] - ant_sup['y'])**2
+        )
+
+        # 後緣高度
+        posterior_height = np.sqrt(
+            (post_inf['x'] - post_sup['x'])**2 +
+            (post_inf['y'] - post_sup['y'])**2
+        )
+
+        # 骨折判斷
+        anterior_wedging = anterior_height < posterior_height * 0.75
+        crush_deformity = anterior_height > posterior_height * 1.25
+
+        return {
+            'anteriorHeight': anterior_height,
+            'posteriorHeight': posterior_height,
+            'heightRatio': anterior_height / posterior_height if posterior_height > 0 else 0,
+            'compressionFracture': anterior_wedging,  # 向下相容
+            'anteriorWedging': anterior_wedging,
+            'crushDeformity': crush_deformity,
+            'boundary': None
+        }
+
+    def get_lower_endplate(self, vertebra, spine_type='L'):
+        """取得椎體的下終板 (anteriorInferior, posteriorInferior)
+
+        完整椎體: 取 anteriorInferior + posteriorInferior
+        上邊界椎體 (S1/T1): 上終板就是椎體的 anteriorSuperior + posteriorSuperior
+            → 此椎體沒有下終板，不應呼叫此方法
+        下邊界椎體 (T12/C2): 只有下終板 → anteriorInferior + posteriorInferior
+        """
+        points = vertebra['points']
+        bt = vertebra.get('boundaryType', None)
+        boundary = self.is_boundary_vertebra(vertebra.get('name', ''), spine_type, bt, points)
+
+        if isinstance(points, dict):
+            if boundary == 'lower':
+                # T12/C2: 只有下終板的 2 點
+                return points['anteriorInferior'], points['posteriorInferior']
+            else:
+                # 完整椎體或上邊界 (不應對上邊界呼叫此方法)
+                return points['anteriorInferior'], points['posteriorInferior']
+        else:
+            return points[3], points[2]
+
+    def get_upper_endplate(self, vertebra, spine_type='L'):
+        """取得椎體的上終板 (anteriorSuperior, posteriorSuperior)
+
+        完整椎體: 取 anteriorSuperior + posteriorSuperior
+        上邊界椎體 (S1/T1): 只有上終板 → anteriorSuperior + posteriorSuperior
+        下邊界椎體 (T12/C2): 只有下終板 → 不應呼叫此方法
+        """
+        points = vertebra['points']
+        if isinstance(points, dict):
+            return points['anteriorSuperior'], points['posteriorSuperior']
+        else:
+            return points[0], points[1]
+
+    def calculate_disc_metrics(self, upper_vertebra, lower_vertebra, spine_type='L'):
+        """計算椎間盤指標
+
+        椎間盤位於 upper_vertebra 的下終板 與 lower_vertebra 的上終板 之間。
+        注意：此處的 upper/lower 指的是解剖學上方/下方（按標註順序排列）。
+
+        對於 L-spine: upper=上方椎體(如L5), lower=下方椎體(如S1)
+        disc 的 upper endplate = upper_vertebra 的下終板
+        disc 的 lower endplate = lower_vertebra 的上終板
+        """
+        upper_ant_inf, upper_post_inf = self.get_lower_endplate(upper_vertebra, spine_type)
+        lower_ant_sup, lower_post_sup = self.get_upper_endplate(lower_vertebra, spine_type)
+
+        # 椎間盤前方高度
+        anterior_height = np.sqrt(
+            (lower_ant_sup['x'] - upper_ant_inf['x'])**2 +
+            (lower_ant_sup['y'] - upper_ant_inf['y'])**2
+        )
+
+        # 椎間盤後方高度
+        posterior_height = np.sqrt(
+            (lower_post_sup['x'] - upper_post_inf['x'])**2 +
+            (lower_post_sup['y'] - upper_post_inf['y'])**2
+        )
+
+        # 平均高度
+        middle_height = (anterior_height + posterior_height) / 2
+
+        # Wedge angle
+        upper_angle = np.arctan2(
+            upper_post_inf['y'] - upper_ant_inf['y'],
+            upper_post_inf['x'] - upper_ant_inf['x']
+        )
+        lower_angle = np.arctan2(
+            lower_post_sup['y'] - lower_ant_sup['y'],
+            lower_post_sup['x'] - lower_ant_sup['x']
+        )
+        wedge_angle = abs(upper_angle - lower_angle) * 180 / np.pi
+        if wedge_angle > 90:
+            wedge_angle = 180 - wedge_angle
+
+        return {
+            'anteriorHeight': anterior_height,
+            'posteriorHeight': posterior_height,
+            'middleHeight': middle_height,
+            'wedgeAngle': wedge_angle
+        }
+
     def prepare_training_data(self, annotations):
         """準備訓練數據"""
         print("📝 準備訓練數據...")
-        
-        train_annotations = []
-        val_annotations = []
-        
+
+        train_data = []
+        val_data = []
+
         for i, ann in enumerate(tqdm(annotations, desc="處理標註")):
             data = ann['data']
             json_file = ann['file']
-            
-            # 自動尋找對應的DICOM檔案
-            image_path = data.get('image_path', '')
-            if not image_path or not os.path.exists(image_path):
-                # 嘗試找同名的.dcm檔案
-                json_path = Path(json_file)
-                dcm_path = json_path.with_suffix('.dcm')
-                
-                if dcm_path.exists():
-                    image_path = str(dcm_path.relative_to(self.input_dir))
-                else:
-                    # 嘗試在同目錄下找同名dcm
-                    base_name = json_path.stem
-                    dcm_candidates = list(json_path.parent.glob(f'{base_name}*.dcm'))
-                    if dcm_candidates:
-                        image_path = str(dcm_candidates[0].relative_to(self.input_dir))
-            
-            # 提取資訊
+            format_version = ann['format']
+
+            # 轉換 V1 格式
+            if format_version == 'v1':
+                data = self.convert_v1_to_v2(data)
+                print(f"  ⚠️ 轉換 V1 格式: {json_file.name}")
+
+            # 自動尋找對應的影像檔案
+            image_path = self.find_image_file(json_file)
+
+            spine_type = data.get('spineType', 'L')
+
+            # 計算椎體指標
+            vertebrae_with_metrics = []
+            for v in data['vertebrae']:
+                metrics = self.calculate_vertebra_metrics(v, spine_type)
+                vertebrae_with_metrics.append({
+                    **v,
+                    'metrics': metrics
+                })
+
+            # 計算椎間盤指標
+            # 椎間盤存在於相鄰的兩個椎體之間
+            # 需要排除無法構成椎間盤的邊界組合:
+            #   - 下邊界椎體 (T12/C2) 不能作為 disc 的 lower vertebra (它沒有上終板)
+            #   - 上邊界椎體 (S1/T1) 不能作為 disc 的 upper vertebra (它沒有下終板)
+            discs = []
+            for j in range(len(vertebrae_with_metrics) - 1):
+                upper = vertebrae_with_metrics[j]
+                lower = vertebrae_with_metrics[j + 1]
+
+                upper_bt = upper.get('boundaryType', None)
+                lower_bt = lower.get('boundaryType', None)
+                upper_boundary = self.is_boundary_vertebra(upper['name'], spine_type, upper_bt, upper.get('points'))
+                lower_boundary = self.is_boundary_vertebra(lower['name'], spine_type, lower_bt, lower.get('points'))
+
+                # 上方椎體需要下終板 (完整椎體或下邊界椎體有下終板)
+                upper_has_lower_ep = upper_boundary != 'upper'
+                # 下方椎體需要上終板 (完整椎體或上邊界椎體有上終板)
+                lower_has_upper_ep = lower_boundary != 'lower'
+
+                if upper_has_lower_ep and lower_has_upper_ep:
+                    disc_metrics = self.calculate_disc_metrics(upper, lower, spine_type)
+                    # 解剖學排序的椎間盤命名
+                    disc_name = self.get_disc_level_name(upper['name'], lower['name'], spine_type)
+                    discs.append({
+                        'level': disc_name,
+                        'metrics': disc_metrics
+                    })
+
+            # 組裝處理後的數據
             processed_data = {
-                'patient_id': data.get('patient_id', ''),
-                'study_id': data.get('study_id', ''),
-                'study_date': data.get('study_date', ''),
-                'spine_type': data.get('spine_type', 'L'),
-                'image_type': data.get('image_type', 'neutral'),
+                'version': '2.0',
+                'source_file': str(json_file.name),
                 'image_path': image_path,
-                'image_dimensions': data.get('image_dimensions', {}),
-                'annotator': data.get('annotator', {}),
-                'annotation_date': data.get('annotation_date', ''),
-                'measurements': [],
-                'vertebra_edges': data.get('vertebra_edges', {}),
-                'clinical_notes': data.get('clinical_notes', {}),
-                'surgery_info': data.get('surgery_info', {})
+                'spine_type': data.get('spineType', 'L'),
+                'image_info': data.get('imageInfo', {}),
+                'vertebrae': vertebrae_with_metrics,
+                'discs': discs,
+                'abnormalities': self.detect_abnormalities(vertebrae_with_metrics, discs, data.get('spineType', 'L'))
             }
-            
-            # 處理measurements
-            for m in data['measurements']:
-                measurement = {
-                    'level': m.get('level', ''),
-                    'lowerEndplate': m.get('lowerEndplate', []),
-                    'upperEndplate': m.get('upperEndplate', []),
-                    'confidence': m.get('confidence', 0.95),
-                    'measurement_method': m.get('measurement_method', 'manual')
-                }
-                
-                # 可選: 保留角度資訊供參考
-                if 'angle' in m:
-                    measurement['angle'] = m['angle']
-                if 'angle_raw' in m:
-                    measurement['angle_raw'] = m['angle_raw']
-                
-                processed_data['measurements'].append(measurement)
-            
-            # 80-20分割
+
+            # 80-20 分割
             if i % 5 == 0:
-                val_annotations.append(processed_data)
+                val_data.append(processed_data)
             else:
-                train_annotations.append(processed_data)
-        
+                train_data.append(processed_data)
+
         # 保存標註檔案
         train_file = self.output_dir / 'annotations' / 'train_annotations.json'
         val_file = self.output_dir / 'annotations' / 'val_annotations.json'
-        
+
         with open(train_file, 'w', encoding='utf-8') as f:
-            json.dump(train_annotations, f, ensure_ascii=False, indent=2)
-        
+            json.dump(train_data, f, ensure_ascii=False, indent=2)
+
         with open(val_file, 'w', encoding='utf-8') as f:
-            json.dump(val_annotations, f, ensure_ascii=False, indent=2)
-        
-        print(f"✅ 訓練集: {len(train_annotations)} 個樣本 -> {train_file}")
-        print(f"✅ 驗證集: {len(val_annotations)} 個樣本 -> {val_file}")
-        
-        return train_annotations, val_annotations
-    
-    def analyze_dataset(self, train_annotations, val_annotations):
+            json.dump(val_data, f, ensure_ascii=False, indent=2)
+
+        print(f"✅ 訓練集: {len(train_data)} 個樣本 -> {train_file}")
+        print(f"✅ 驗證集: {len(val_data)} 個樣本 -> {val_file}")
+
+        return train_data, val_data
+
+    def find_image_file(self, json_file):
+        """尋找對應的影像檔案"""
+        json_path = Path(json_file)
+        base_name = json_path.stem
+
+        # 嘗試不同的影像格式
+        extensions = ['.dcm', '.png', '.jpg', '.jpeg']
+
+        for ext in extensions:
+            candidate = json_path.with_suffix(ext)
+            if candidate.exists():
+                try:
+                    return str(candidate.relative_to(self.input_dir))
+                except ValueError:
+                    return str(candidate)
+
+        # 嘗試在同目錄下找
+        for ext in extensions:
+            candidates = list(json_path.parent.glob(f'{base_name}*{ext}'))
+            if candidates:
+                try:
+                    return str(candidates[0].relative_to(self.input_dir))
+                except ValueError:
+                    return str(candidates[0])
+
+        return ''
+
+    def get_disc_level_name(self, upper_name, lower_name, spine_type):
+        """產生解剖學排序的椎間盤名稱
+
+        L-spine: 上方在前 (如 L5/S1, L4/L5)
+        C-spine: 上方在前 (如 C3/C4, C6/C7)
+        """
+        # 定義解剖學順序 (由上到下)
+        anatomical_order = {
+            'L': ['T12', 'L1', 'L2', 'L3', 'L4', 'L5', 'S1'],
+            'C': ['C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'T1'],
+        }
+        order = anatomical_order.get(spine_type, [])
+
+        idx_upper = order.index(upper_name) if upper_name in order else -1
+        idx_lower = order.index(lower_name) if lower_name in order else -1
+
+        # 確保上方椎體在前
+        if idx_upper >= 0 and idx_lower >= 0:
+            if idx_upper < idx_lower:
+                return f"{upper_name}/{lower_name}"
+            else:
+                return f"{lower_name}/{upper_name}"
+
+        return f"{upper_name}/{lower_name}"
+
+    def detect_abnormalities(self, vertebrae, discs, spine_type):
+        """檢測異常"""
+        abnormalities = {
+            'compression_fractures': [],
+            'listhesis': [],
+            'height_progression_issues': []
+        }
+
+        # 1. 壓迫性骨折 (只檢查完整椎體)
+        for v in vertebrae:
+            metrics = v['metrics']
+            if metrics.get('anteriorWedging') or metrics.get('compressionFracture'):
+                abnormalities['compression_fractures'].append({
+                    'vertebra': v['name'],
+                    'type': 'anteriorWedging',
+                    'ratio': metrics['heightRatio']
+                })
+            elif metrics.get('crushDeformity'):
+                abnormalities['compression_fractures'].append({
+                    'vertebra': v['name'],
+                    'type': 'crushDeformity',
+                    'ratio': metrics['heightRatio']
+                })
+
+        # 2. 滑脫檢測（需要至少3個有後緣資訊的椎體）
+        # 收集有後緣資訊的椎體 (完整椎體有 posteriorSuperior + posteriorInferior)
+        # 上邊界椎體 (S1/T1) 只有 posteriorSuperior → 只能取單點
+        # 下邊界椎體 (T12/C2) 只有 posteriorInferior → 只能取單點
+        posterior_midpoints = []
+        vertebrae_for_listhesis = []
+        for v in vertebrae:
+            pts = v['points']
+            name = v['name']
+            bt = v.get('boundaryType', None)
+            boundary = self.is_boundary_vertebra(name, spine_type, bt, pts)
+
+            if isinstance(pts, dict):
+                if boundary == 'upper':
+                    # 上邊界 (S1/T1): 只有上終板 → posteriorSuperior
+                    mid_x = pts['posteriorSuperior']['x']
+                    mid_y = pts['posteriorSuperior']['y']
+                elif boundary == 'lower':
+                    # 下邊界 (T12/C2): 只有下終板 → posteriorInferior
+                    mid_x = pts['posteriorInferior']['x']
+                    mid_y = pts['posteriorInferior']['y']
+                else:
+                    # 完整椎體: 後緣中點
+                    mid_x = (pts['posteriorSuperior']['x'] + pts['posteriorInferior']['x']) / 2
+                    mid_y = (pts['posteriorSuperior']['y'] + pts['posteriorInferior']['y']) / 2
+            else:
+                if len(pts) >= 4:
+                    mid_x = (pts[1]['x'] + pts[2]['x']) / 2
+                    mid_y = (pts[1]['y'] + pts[2]['y']) / 2
+                elif len(pts) >= 2:
+                    mid_x = pts[1]['x'] if len(pts) > 1 else pts[0]['x']
+                    mid_y = pts[1]['y'] if len(pts) > 1 else pts[0]['y']
+                else:
+                    continue
+
+            posterior_midpoints.append({'name': name, 'x': mid_x, 'y': mid_y})
+            vertebrae_for_listhesis.append(v)
+
+        if len(posterior_midpoints) >= 3:
+            first = posterior_midpoints[0]
+            last = posterior_midpoints[-1]
+
+            for i in range(1, len(posterior_midpoints) - 1):
+                p = posterior_midpoints[i]
+
+                line_len = np.sqrt((last['x'] - first['x'])**2 + (last['y'] - first['y'])**2)
+                if line_len > 0:
+                    distance = abs(
+                        (last['y'] - first['y']) * p['x'] -
+                        (last['x'] - first['x']) * p['y'] +
+                        last['x'] * first['y'] - last['y'] * first['x']
+                    ) / line_len
+
+                    # 計算椎體寬度
+                    v = vertebrae_for_listhesis[i]
+                    pts = v['points']
+                    if isinstance(pts, dict):
+                        if 'anteriorSuperior' in pts and 'posteriorSuperior' in pts:
+                            width = abs(pts['posteriorSuperior']['x'] - pts['anteriorSuperior']['x'])
+                        elif 'anteriorInferior' in pts and 'posteriorInferior' in pts:
+                            width = abs(pts['posteriorInferior']['x'] - pts['anteriorInferior']['x'])
+                        else:
+                            width = 100  # fallback
+                    else:
+                        width = abs(pts[1]['x'] - pts[0]['x']) if len(pts) >= 2 else 100
+
+                    shift_percent = (distance / width) * 100 if width > 0 else 0
+
+                    if shift_percent > 5:
+                        expected_x = first['x'] + (p['y'] - first['y']) * (last['x'] - first['x']) / (last['y'] - first['y']) if (last['y'] - first['y']) != 0 else first['x']
+                        listhesis_type = 'retrolisthesis' if p['x'] > expected_x else 'anterolisthesis'
+
+                        abnormalities['listhesis'].append({
+                            'vertebra': p['name'],
+                            'type': listhesis_type,
+                            'shift_percent': shift_percent
+                        })
+
+        # 3. 椎間盤高度遞進檢查
+        if len(discs) >= 2:
+            heights = [d['metrics']['middleHeight'] for d in discs]
+
+            if spine_type == 'L':
+                # L-spine: L4/5 應該最高
+                l45_idx = next((i for i, d in enumerate(discs) if 'L4/L5' in d['level']), None)
+
+                if l45_idx is not None:
+                    l45_height = heights[l45_idx]
+                    for i, d in enumerate(discs):
+                        if i != l45_idx and 'L5/S1' not in d['level']:
+                            if heights[i] > l45_height * 1.1:
+                                abnormalities['height_progression_issues'].append({
+                                    'level': d['level'],
+                                    'issue': 'height_exceeds_L4L5'
+                                })
+
+            elif spine_type == 'C':
+                # C-spine: 應該越來越高
+                for i in range(len(heights) - 1):
+                    if heights[i] > heights[i + 1] * 1.2:
+                        abnormalities['height_progression_issues'].append({
+                            'level': discs[i]['level'],
+                            'issue': 'height_not_increasing'
+                        })
+
+        return abnormalities
+
+    def analyze_dataset(self, train_data, val_data):
         """分析數據集統計資訊"""
         print("\n📊 數據集分析:")
-        
-        all_annotations = train_annotations + val_annotations
-        
-        # 總樣本數
-        print(f"  總樣本數: {len(all_annotations)}")
-        print(f"  訓練樣本: {len(train_annotations)}")
-        print(f"  驗證樣本: {len(val_annotations)}")
-        
+
+        all_data = train_data + val_data
+
+        print(f"  總樣本數: {len(all_data)}")
+        print(f"  訓練樣本: {len(train_data)}")
+        print(f"  驗證樣本: {len(val_data)}")
+
         # 脊椎類型統計
         spine_types = {}
-        for ann in all_annotations:
-            spine_type = ann.get('spine_type', 'L')
-            spine_types[spine_type] = spine_types.get(spine_type, 0) + 1
+        for d in all_data:
+            st = d.get('spine_type', 'L')
+            spine_types[st] = spine_types.get(st, 0) + 1
         print(f"\n  脊椎類型分布: {spine_types}")
-        
-        # 影像類型統計
-        image_types = {}
-        for ann in all_annotations:
-            image_type = ann.get('image_type', 'neutral')
-            image_types[image_type] = image_types.get(image_type, 0) + 1
-        print(f"  影像類型分布: {image_types}")
-        
-        # 椎間隙統計
-        total_measurements = sum(len(ann['measurements']) for ann in all_annotations)
-        avg_measurements = total_measurements / len(all_annotations)
-        print(f"\n  總椎間隙數: {total_measurements}")
-        print(f"  平均每張影像: {avg_measurements:.1f} 個椎間隙")
-        
-        # 椎間隙層級統計
-        level_counts = {}
-        for ann in all_annotations:
-            for m in ann['measurements']:
-                level = m.get('level', '')
-                level_counts[level] = level_counts.get(level, 0) + 1
-        
-        print(f"\n  椎間隙層級分布:")
-        for level in sorted(level_counts.keys()):
-            print(f"    {level}: {level_counts[level]}")
-        
-        # 終板點數統計
-        total_endplate_points = 0
-        for ann in all_annotations:
-            for m in ann['measurements']:
-                total_endplate_points += len(m.get('lowerEndplate', [])) + len(m.get('upperEndplate', []))
-        print(f"\n  總終板點數: {total_endplate_points}")
-        
-        # 椎體邊緣統計
-        vertebra_with_edges = sum(1 for ann in all_annotations if ann.get('vertebra_edges'))
-        total_edges = sum(len(ann.get('vertebra_edges', {})) for ann in all_annotations)
-        print(f"\n  包含椎體邊緣的樣本: {vertebra_with_edges}")
-        print(f"  總椎體邊緣數: {total_edges}")
-        
-        # 手術資訊統計
-        surgery_cases = sum(1 for ann in all_annotations 
-                          if ann.get('surgery_info', {}).get('surgery_done', False))
-        print(f"\n  術後病例: {surgery_cases}/{len(all_annotations)}")
-        
-        # 影像尺寸統計
-        widths = [ann['image_dimensions'].get('width', 0) for ann in all_annotations]
-        heights = [ann['image_dimensions'].get('height', 0) for ann in all_annotations]
-        
-        if widths and heights:
-            print(f"\n  影像尺寸範圍:")
-            print(f"    寬度: {min(widths)} - {max(widths)} (平均: {np.mean(widths):.0f})")
-            print(f"    高度: {min(heights)} - {max(heights)} (平均: {np.mean(heights):.0f})")
-    
+
+        # 椎體統計
+        total_vertebrae = sum(len(d['vertebrae']) for d in all_data)
+        avg_vertebrae = total_vertebrae / len(all_data) if all_data else 0
+        print(f"\n  總椎體數: {total_vertebrae}")
+        print(f"  平均每張影像: {avg_vertebrae:.1f} 個椎體")
+
+        # 椎體名稱分布
+        vertebra_counts = {}
+        for d in all_data:
+            for v in d['vertebrae']:
+                name = v['name']
+                vertebra_counts[name] = vertebra_counts.get(name, 0) + 1
+
+        print(f"\n  椎體分布:")
+        for name in sorted(vertebra_counts.keys()):
+            print(f"    {name}: {vertebra_counts[name]}")
+
+        # 異常統計
+        total_fractures = sum(len(d['abnormalities']['compression_fractures']) for d in all_data)
+        total_listhesis = sum(len(d['abnormalities']['listhesis']) for d in all_data)
+        total_height_issues = sum(len(d['abnormalities']['height_progression_issues']) for d in all_data)
+
+        print(f"\n  異常統計:")
+        print(f"    壓迫性骨折: {total_fractures}")
+        print(f"    滑脫: {total_listhesis}")
+        print(f"    高度遞進異常: {total_height_issues}")
+
     def create_dataset_info(self):
         """創建數據集資訊檔案"""
         info = {
-            "dataset_name": "Spine Endplate Detection Dataset",
-            "description": "脊椎終板檢測機器學習數據集 - 專注於終板前後緣檢測",
-            "version": "2.0",
-            "created_by": "AI Assistant",
-            "format": {
-                "images": "DICOM/JPG",
-                "annotations": "JSON",
-                "coordinate_system": "pixel coordinates"
-            },
-            "tasks": [
-                "endplate_segmentation",
-                "vertebra_edge_detection",
-                "keypoint_detection"
-            ],
+            "dataset_name": "Spine Vertebra Corner Detection Dataset V2.1",
+            "description": "脊椎椎體頂點檢測機器學習數據集 - 完整椎體4角點, 邊界椎體2點",
+            "version": "2.1",
             "annotation_format": {
-                "measurements": [
+                "vertebrae": [
                     {
-                        "level": "椎間隙標籤 (如 L4/L5)",
-                        "lowerEndplate": "下終板2個端點座標 [{x, y}, {x, y}]",
-                        "upperEndplate": "上終板2個端點座標 [{x, y}, {x, y}]",
-                        "confidence": "信心度 (0-1)"
+                        "name": "椎體名稱 (如 L4)",
+                        "points": {
+                            "anteriorSuperior": "前上角座標 {x, y}",
+                            "posteriorSuperior": "後上角座標 {x, y}",
+                            "posteriorInferior": "後下角座標 {x, y}",
+                            "anteriorInferior": "前下角座標 {x, y}"
+                        },
+                        "metrics": {
+                            "anteriorHeight": "前緣高度 (px)",
+                            "posteriorHeight": "後緣高度 (px)",
+                            "heightRatio": "前/後比例",
+                            "compressionFracture": "是否壓迫性骨折 (前緣 < 後緣 * 0.75)"
+                        }
                     }
                 ],
-                "vertebra_edges": {
-                    "vertebra_name": {
-                        "anterior": "前緣2個端點座標",
-                        "posterior": "後緣2個端點座標"
+                "discs": [
+                    {
+                        "level": "椎間盤標籤 (如 L4/L5)",
+                        "metrics": {
+                            "anteriorHeight": "前方高度",
+                            "posteriorHeight": "後方高度",
+                            "middleHeight": "平均高度",
+                            "wedgeAngle": "楔形角度"
+                        }
                     }
+                ],
+                "abnormalities": {
+                    "compression_fractures": "壓迫性骨折列表",
+                    "listhesis": "滑脫列表 (>5% 後緣偏移)",
+                    "height_progression_issues": "高度遞進異常"
                 }
             },
-            "model_outputs": [
-                "endplate_segmentation_mask",
-                "vertebra_anterior_edge",
-                "vertebra_posterior_edge",
-                "endplate_keypoints"
+            "model_tasks": [
+                "vertebra_corner_detection",
+                "keypoint_regression"
             ],
-            "notes": "機器學習模型只負責檢測終板前後緣，不計算角度"
+            "clinical_rules": {
+                "compression_fracture": "anterior_height < posterior_height * 0.75",
+                "listhesis_threshold": "5% vertebra width",
+                "L_spine_height_pattern": "L4/L5 should be highest, L5/S1 can be smaller",
+                "C_spine_height_pattern": "heights should increase caudally"
+            }
         }
-        
+
         with open(self.output_dir / 'dataset_info.json', 'w', encoding='utf-8') as f:
             json.dump(info, f, ensure_ascii=False, indent=2)
-        
+
         print("\n✅ 創建數據集資訊檔案")
-    
+
     def process_all(self):
         """處理所有數據"""
-        print("🚀 開始終板檢測數據準備流程...")
-        
+        print("🚀 開始椎體頂點檢測數據準備流程 V2...")
+
         # 1. 收集標註檔案
         annotations = self.collect_annotations()
-        
+
         if not annotations:
             print("❌ 未找到有效的標註檔案")
+            print("💡 請使用 spinal-annotation-web.html 進行標註")
             return
-        
+
         # 2. 準備訓練數據
-        train_annotations, val_annotations = self.prepare_training_data(annotations)
-        
+        train_data, val_data = self.prepare_training_data(annotations)
+
         # 3. 分析數據集
-        self.analyze_dataset(train_annotations, val_annotations)
-        
+        self.analyze_dataset(train_data, val_data)
+
         # 4. 創建數據集資訊
         self.create_dataset_info()
-        
+
         print("\n🎉 數據準備完成!")
         print(f"📁 輸出目錄: {self.output_dir}")
         print("📋 生成的檔案:")
@@ -304,18 +813,15 @@ class EndplateDataPreparer:
 
 def main():
     """主函數"""
-    parser = argparse.ArgumentParser(description='終板檢測數據準備')
+    parser = argparse.ArgumentParser(description='椎體頂點檢測數據準備 V2')
     parser.add_argument('--input_dir', type=str, default='.',
                        help='標註檔案目錄（預設為當前目錄）')
     parser.add_argument('--output_dir', type=str, default='endplate_training_data',
-                       help='輸出目錄（預設為當前目錄下的 endplate_training_data）')
-    
+                       help='輸出目錄')
+
     args = parser.parse_args()
-    
-    # 創建數據準備器
-    preparer = EndplateDataPreparer(args.input_dir, args.output_dir)
-    
-    # 處理所有數據
+
+    preparer = VertebraDataPreparer(args.input_dir, args.output_dir)
     preparer.process_all()
 
 if __name__ == "__main__":
