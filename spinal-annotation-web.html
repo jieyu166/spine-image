@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>脊椎椎體標註工具 V2 - Vertebra Annotation</title>
+    <title>脊椎椎體標註工具 V2.2 - Vertebra Annotation</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -328,7 +328,7 @@
 
         .point-guide {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 5px;
             margin-top: 10px;
             font-size: 11px;
@@ -346,9 +346,11 @@
         }
 
         .point-1 { background: #ffcccc; }
-        .point-2 { background: #ccffcc; }
-        .point-3 { background: #ccccff; }
-        .point-4 { background: #ffffcc; }
+        .point-2 { background: #ccffee; }
+        .point-3 { background: #ccffcc; }
+        .point-4 { background: #ccccff; }
+        .point-5 { background: #ffe0cc; }
+        .point-6 { background: #ffffcc; }
 
         @media (max-width: 1200px) {
             .main-content { grid-template-columns: 1fr; }
@@ -360,8 +362,8 @@
     <div class="container">
         <div class="header">
             <div>
-                <h1>🦴 脊椎椎體標註工具 V2</h1>
-                <div class="header-info">每個椎體標註4個角點，自動計算椎間盤與異常</div>
+                <h1>🦴 脊椎椎體標註工具 V2.2</h1>
+                <div class="header-info">每個椎體標註6點（含終板中點），自動計算椎間盤與異常</div>
             </div>
             <div class="spine-type-selector">
                 <button class="spine-type-btn active" data-type="L" onclick="setSpineType('L')">
@@ -413,10 +415,6 @@
                 <div class="current-task" id="currentTask">
                     <strong>📍 下一步：</strong><span id="taskText">請先載入或貼上影像</span>
                     <div class="point-guide" id="pointGuide" style="display: none;">
-                        <div class="point-item point-1" id="guide1">① 前上角</div>
-                        <div class="point-item point-2" id="guide2">② 後上角</div>
-                        <div class="point-item point-3" id="guide3">③ 後下角</div>
-                        <div class="point-item point-4" id="guide4">④ 前下角</div>
                     </div>
                 </div>
 
@@ -472,9 +470,11 @@
 
         const COLORS = {
             point1: '#ff6b6b', // 前上角 - 紅
-            point2: '#51cf66', // 後上角 - 綠
-            point3: '#339af0', // 後下角 - 藍
-            point4: '#fcc419', // 前下角 - 黃
+            point2: '#20c997', // 上終板中點 - 青
+            point3: '#51cf66', // 後上角 - 綠
+            point4: '#339af0', // 後下角 - 藍
+            point5: '#fd7e14', // 下終板中點 - 橙
+            point6: '#fcc419', // 前下角 - 黃
             line: '#ffffff',
             currentVertebra: '#00ff00',
             completedVertebra: '#3498db',
@@ -516,20 +516,20 @@
         }
 
         function getRequiredPoints(name) {
-            // 邊界椎體只需 2 點，完整椎體 4 點
-            return isBoundary(name) ? 2 : 4;
+            // 邊界椎體需 3 點（含中點），完整椎體 6 點
+            return isBoundary(name) ? 3 : 6;
         }
 
         function getPointLabelsForVertebra(name) {
             const b = isBoundary(name);
             if (b === 'upper') {
-                // S1/T1: 只有上終板 → 前上角, 後上角
-                return ['前上角', '後上角'];
+                // S1/T1: 只有上終板 → 前上角, 上終板中點, 後上角
+                return ['前上角', '上終板中點', '後上角'];
             } else if (b === 'lower') {
-                // T12/C2: 只有下終板 → 前下角, 後下角
-                return ['前下角', '後下角'];
+                // T12/C2: 只有下終板 → 前下角, 下終板中點, 後下角
+                return ['前下角', '下終板中點', '後下角'];
             }
-            return ['前上角', '後上角', '後下角', '前下角'];
+            return ['前上角', '上終板中點', '後上角', '後下角', '下終板中點', '前下角'];
         }
 
         // ==================== 初始化 ====================
@@ -765,25 +765,29 @@
         }
 
         function normalizeEndplate(points) {
-            // 2 點: x 較小的在前（anterior）
+            // 3 點: x 排序 → [anterior(最小x), middle(中間x), posterior(最大x)]
             const sorted = [...points].sort((a, b) => a.x - b.x);
-            return [sorted[0], sorted[1]]; // [anterior, posterior]
+            return [sorted[0], sorted[1], sorted[2]]; // [anterior, middle, posterior]
         }
 
         function normalizePoints(points) {
-            // 4 點: [前上, 後上, 後下, 前下]
+            // 6 點: [前上, 上中, 後上, 後下, 下中, 前下]
+            // 按 y 排序，取上3個和下3個
             const sorted = [...points].sort((a, b) => a.y - b.y);
-            const topPoints = sorted.slice(0, 2);
-            const bottomPoints = sorted.slice(2, 4);
+            const topPoints = sorted.slice(0, 3);
+            const bottomPoints = sorted.slice(3, 6);
 
+            // 各組按 x 排序
             topPoints.sort((a, b) => a.x - b.x);
             bottomPoints.sort((a, b) => a.x - b.x);
 
             return [
-                topPoints[0],     // 前上角 (anterior-superior)
-                topPoints[1],     // 後上角 (posterior-superior)
-                bottomPoints[1],  // 後下角 (posterior-inferior)
-                bottomPoints[0]   // 前下角 (anterior-inferior)
+                topPoints[0],     // 0: 前上角 (anterior-superior)
+                topPoints[1],     // 1: 上終板中點 (middle-superior)
+                topPoints[2],     // 2: 後上角 (posterior-superior)
+                bottomPoints[2],  // 3: 後下角 (posterior-inferior)
+                bottomPoints[1],  // 4: 下終板中點 (middle-inferior)
+                bottomPoints[0]   // 5: 前下角 (anterior-inferior)
             ];
         }
 
@@ -793,54 +797,60 @@
                 // 邊界椎體只有一條終板，無法計算前後緣高度
                 v.anteriorHeight = null;
                 v.posteriorHeight = null;
+                v.middleHeight = null;
                 return;
             }
             const pts = v.points;
+            // pts: [0:AS, 1:MS, 2:PS, 3:PI, 4:MI, 5:AI]
             v.anteriorHeight = Math.sqrt(
-                Math.pow(pts[3].x - pts[0].x, 2) + Math.pow(pts[3].y - pts[0].y, 2)
+                Math.pow(pts[5].x - pts[0].x, 2) + Math.pow(pts[5].y - pts[0].y, 2)
             );
             v.posteriorHeight = Math.sqrt(
-                Math.pow(pts[2].x - pts[1].x, 2) + Math.pow(pts[2].y - pts[1].y, 2)
+                Math.pow(pts[3].x - pts[2].x, 2) + Math.pow(pts[3].y - pts[2].y, 2)
+            );
+            v.middleHeight = Math.sqrt(
+                Math.pow(pts[4].x - pts[1].x, 2) + Math.pow(pts[4].y - pts[1].y, 2)
             );
         }
 
         // ==================== 取得終板座標（統一介面）====================
         function getUpperEndplate(v) {
-            // 取得椎體上終板的 [anterior, posterior] 座標
+            // 取得椎體上終板的 [anterior, middle, posterior] 座標
             if (v.boundaryType === 'upper') {
-                // S1/T1: 只有上終板 [前上, 後上]
-                return [v.points[0], v.points[1]];
+                // S1/T1: 只有上終板 [前上, 上中, 後上]
+                return [v.points[0], v.points[1], v.points[2]];
             } else if (v.boundaryType === 'lower') {
                 // T12/C2: 沒有上終板
                 return null;
             }
-            // 完整椎體: [前上, 後上]
-            return [v.points[0], v.points[1]];
+            // 完整椎體: [前上, 上中, 後上]
+            return [v.points[0], v.points[1], v.points[2]];
         }
 
         function getLowerEndplate(v) {
-            // 取得椎體下終板的 [anterior, posterior] 座標
+            // 取得椎體下終板的 [anterior, middle, posterior] 座標
             if (v.boundaryType === 'lower') {
-                // T12/C2: 只有下終板 [前下, 後下]
-                return [v.points[0], v.points[1]];
+                // T12/C2: 只有下終板 [前下, 下中, 後下]
+                return [v.points[0], v.points[1], v.points[2]];
             } else if (v.boundaryType === 'upper') {
                 // S1/T1: 沒有下終板
                 return null;
             }
-            // 完整椎體: [前下, 後下]
-            return [v.points[3], v.points[2]];
+            // 完整椎體: [前下, 下中, 後下]
+            return [v.points[5], v.points[4], v.points[3]];
         }
 
         function getPosteriorPoints(v) {
             // 取得後緣的 [上, 下] 座標，用於滑脫檢測
             if (v.boundaryType === 'upper') {
                 // S1/T1: 只有上終板，後緣上點 = posterior-superior
-                return { top: v.points[1], bottom: null };
+                return { top: v.points[2], bottom: null };
             } else if (v.boundaryType === 'lower') {
                 // T12/C2: 只有下終板，後緣下點 = posterior-inferior
-                return { top: null, bottom: v.points[1] };
+                return { top: null, bottom: v.points[2] };
             }
-            return { top: v.points[1], bottom: v.points[2] };
+            // pts: [0:AS, 1:MS, 2:PS, 3:PI, 4:MI, 5:AI]
+            return { top: v.points[2], bottom: v.points[3] };
         }
 
         // ==================== 快捷鍵 ====================
@@ -930,14 +940,14 @@
             const nextName = getNextVertebraName();
             const labels = nextName ? getPointLabelsForVertebra(nextName) : [];
             currentPoints.forEach((p, idx) => {
-                const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4];
+                const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4, COLORS.point5, COLORS.point6];
                 drawPoint(p, colors[idx], idx + 1);
                 if (idx > 0) drawLine(currentPoints[idx-1], p, '#ffffff', 2);
             });
 
             // 預覽閉合線
-            const reqPts = nextName ? getRequiredPoints(nextName) : 4;
-            if (currentPoints.length === reqPts - 1 && reqPts === 4) {
+            const reqPts = nextName ? getRequiredPoints(nextName) : 6;
+            if (currentPoints.length === reqPts - 1 && reqPts === 6) {
                 ctx.setLineDash([5, 5]);
                 drawLine(currentPoints[currentPoints.length - 1], currentPoints[0], '#ffffff', 1);
                 ctx.setLineDash([]);
@@ -950,62 +960,93 @@
             const pts = v.points;
 
             if (v.boundaryType) {
-                // 邊界椎體：只畫一條終板線
+                // 邊界椎體：畫 3 點終板折線（anterior → middle → posterior）
                 ctx.strokeStyle = color;
                 ctx.lineWidth = 3 / zoom;
                 ctx.beginPath();
                 ctx.moveTo(pts[0].x, pts[0].y);
                 ctx.lineTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[2].x, pts[2].y);
                 ctx.stroke();
 
-                // 標記前緣和後緣端點
+                // 標記端點
                 drawPoint(pts[0], COLORS.point1, null, 5 / zoom); // 前
-                drawPoint(pts[1], COLORS.point2, null, 5 / zoom); // 後
+                drawPoint(pts[1], COLORS.point2, null, 5 / zoom); // 中
+                drawPoint(pts[2], COLORS.point3, null, 5 / zoom); // 後
 
                 // 標籤
-                const cx = (pts[0].x + pts[1].x) / 2;
-                const cy = (pts[0].y + pts[1].y) / 2;
+                const cx = pts[1].x;
+                const cy = pts[1].y;
                 const offset = v.boundaryType === 'upper' ? -20 : 20;
                 drawLabel(v.name, cx, cy + offset / zoom);
             } else {
-                // 完整椎體
+                // 完整椎體 6 點: [0:AS, 1:MS, 2:PS, 3:PI, 4:MI, 5:AI]
+                // 繪製填充多邊形
                 ctx.fillStyle = color + '30';
                 ctx.beginPath();
                 ctx.moveTo(pts[0].x, pts[0].y);
-                pts.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.lineTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[2].x, pts[2].y);
+                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.lineTo(pts[4].x, pts[4].y);
+                ctx.lineTo(pts[5].x, pts[5].y);
                 ctx.closePath();
                 ctx.fill();
 
+                // 繪製輪廓
                 ctx.strokeStyle = color;
                 ctx.lineWidth = 2 / zoom;
                 ctx.beginPath();
                 ctx.moveTo(pts[0].x, pts[0].y);
-                pts.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.lineTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[2].x, pts[2].y);
+                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.lineTo(pts[4].x, pts[4].y);
+                ctx.lineTo(pts[5].x, pts[5].y);
                 ctx.closePath();
                 ctx.stroke();
 
-                // 前緣
+                // 上終板（紅色折線）: AS → MS → PS
                 ctx.strokeStyle = '#ff6b6b';
                 ctx.lineWidth = 3 / zoom;
                 ctx.beginPath();
                 ctx.moveTo(pts[0].x, pts[0].y);
-                ctx.lineTo(pts[3].x, pts[3].y);
-                ctx.stroke();
-
-                // 後緣
-                ctx.strokeStyle = '#339af0';
-                ctx.beginPath();
-                ctx.moveTo(pts[1].x, pts[1].y);
+                ctx.lineTo(pts[1].x, pts[1].y);
                 ctx.lineTo(pts[2].x, pts[2].y);
                 ctx.stroke();
 
+                // 下終板（藍色折線）: AI → MI → PI
+                ctx.strokeStyle = '#339af0';
+                ctx.beginPath();
+                ctx.moveTo(pts[5].x, pts[5].y);
+                ctx.lineTo(pts[4].x, pts[4].y);
+                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.stroke();
+
+                // 前緣: AS → AI
+                ctx.strokeStyle = '#ff6b6b80';
+                ctx.lineWidth = 2 / zoom;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, pts[0].y);
+                ctx.lineTo(pts[5].x, pts[5].y);
+                ctx.stroke();
+
+                // 後緣: PS → PI
+                ctx.strokeStyle = '#339af080';
+                ctx.beginPath();
+                ctx.moveTo(pts[2].x, pts[2].y);
+                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.stroke();
+
+                // 繪製各角點
+                const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4, COLORS.point5, COLORS.point6];
                 pts.forEach((p, i) => {
-                    const colors = [COLORS.point1, COLORS.point2, COLORS.point3, COLORS.point4];
                     drawPoint(p, colors[i], null, 4 / zoom);
                 });
 
-                const centerX = (pts[0].x + pts[2].x) / 2;
-                const centerY = (pts[0].y + pts[2].y) / 2;
+                // 標籤放在椎體中心
+                const centerX = (pts[0].x + pts[3].x) / 2;
+                const centerY = (pts[0].y + pts[3].y) / 2;
                 drawLabel(v.name, centerX, centerY);
             }
         }
@@ -1079,8 +1120,8 @@
 
         function calculateDiscMetrics(upperV, lowerV) {
             // 上椎體的下終板 vs 下椎體的上終板
-            const upperLower = getLowerEndplate(upperV); // [anterior, posterior]
-            const lowerUpper = getUpperEndplate(lowerV); // [anterior, posterior]
+            const upperLower = getLowerEndplate(upperV); // [anterior, middle, posterior]
+            const lowerUpper = getUpperEndplate(lowerV); // [anterior, middle, posterior]
 
             if (!upperLower || !lowerUpper) return null;
 
@@ -1090,19 +1131,23 @@
             );
 
             const posteriorHeight = Math.sqrt(
+                Math.pow(lowerUpper[2].x - upperLower[2].x, 2) +
+                Math.pow(lowerUpper[2].y - upperLower[2].y, 2)
+            );
+
+            // 使用實際中點距離，而非平均值，避免凹陷終板造成重複
+            const middleHeight = Math.sqrt(
                 Math.pow(lowerUpper[1].x - upperLower[1].x, 2) +
                 Math.pow(lowerUpper[1].y - upperLower[1].y, 2)
             );
 
-            const middleHeight = (anteriorHeight + posteriorHeight) / 2;
-
             const upperAngle = Math.atan2(
-                upperLower[1].y - upperLower[0].y,
-                upperLower[1].x - upperLower[0].x
+                upperLower[2].y - upperLower[0].y,
+                upperLower[2].x - upperLower[0].x
             );
             const lowerAngle = Math.atan2(
-                lowerUpper[1].y - lowerUpper[0].y,
-                lowerUpper[1].x - lowerUpper[0].x
+                lowerUpper[2].y - lowerUpper[0].y,
+                lowerUpper[2].x - lowerUpper[0].x
             );
             let wedgeAngle = Math.abs(upperAngle - lowerAngle) * 180 / Math.PI;
             if (wedgeAngle > 90) wedgeAngle = 180 - wedgeAngle;
@@ -1151,7 +1196,7 @@
                 // 使用上終板寬度作為參考
                 const upper = getUpperEndplate(p.v);
                 if (!upper) continue;
-                const width = Math.abs(upper[1].x - upper[0].x);
+                const width = Math.abs(upper[2].x - upper[0].x);
                 if (width === 0) continue;
 
                 const shiftPercent = (distance / width) * 100;
@@ -1283,7 +1328,7 @@
             let guideHtml = '';
             labels.forEach((label, i) => {
                 const isActive = i === currentPoints.length;
-                const colorClasses = ['point-1', 'point-2', 'point-3', 'point-4'];
+                const colorClasses = ['point-1', 'point-2', 'point-3', 'point-4', 'point-5', 'point-6'];
                 guideHtml += `<div class="point-item ${colorClasses[i]} ${isActive ? 'active' : ''}">
                     ${i + 1} ${label}
                 </div>`;
@@ -1334,12 +1379,16 @@
                                 <span class="metric-value">${v.anteriorHeight?.toFixed(1) || '-'} px</span>
                             </div>
                             <div class="metric-row">
+                                <span class="metric-label">中間高度:</span>
+                                <span class="metric-value">${v.middleHeight?.toFixed(1) || '-'} px</span>
+                            </div>
+                            <div class="metric-row">
                                 <span class="metric-label">後緣高度:</span>
                                 <span class="metric-value">${v.posteriorHeight?.toFixed(1) || '-'} px</span>
                             </div>
                             <div class="metric-row">
                                 <span class="metric-label">前/後比例:</span>
-                                <span class="metric-value ${isAbnormal ? 'danger' : ''}">${v.anteriorHeight && v.posteriorHeight ? (v.anteriorHeight / v.posteriorHeight * 100).toFixed(0) + '%' : '-'}</span>
+                                <span class="metric-value ${abnormalType ? 'danger' : ''}">${v.anteriorHeight && v.posteriorHeight ? (v.anteriorHeight / v.posteriorHeight * 100).toFixed(0) + '%' : '-'}</span>
                             </div>
                             ${abnormalType === 'anteriorWedging' ? '<div style="color: #dc3545; font-size: 11px; margin-top: 5px;">⚠️ 疑似前緣壓迫性骨折 (Anterior Wedging)</div>' : ''}
                             ${abnormalType === 'crushDeformity' ? '<div style="color: #dc3545; font-size: 11px; margin-top: 5px;">⚠️ 疑似 Crush Deformity Compression Fracture</div>' : ''}`;
@@ -1480,7 +1529,7 @@
             }
 
             const data = {
-                version: "2.1",
+                version: "2.2",
                 exportDate: new Date().toISOString(),
                 spineType: spineType,
                 imageInfo: originalImage ? {
@@ -1495,21 +1544,26 @@
                     if (v.boundaryType === 'upper') {
                         entry.points = {
                             anteriorSuperior: v.points[0],
-                            posteriorSuperior: v.points[1]
+                            middleSuperior: v.points[1],
+                            posteriorSuperior: v.points[2]
                         };
                     } else if (v.boundaryType === 'lower') {
                         entry.points = {
                             anteriorInferior: v.points[0],
-                            posteriorInferior: v.points[1]
+                            middleInferior: v.points[1],
+                            posteriorInferior: v.points[2]
                         };
                     } else {
                         entry.points = {
                             anteriorSuperior: v.points[0],
-                            posteriorSuperior: v.points[1],
-                            posteriorInferior: v.points[2],
-                            anteriorInferior: v.points[3]
+                            middleSuperior: v.points[1],
+                            posteriorSuperior: v.points[2],
+                            posteriorInferior: v.points[3],
+                            middleInferior: v.points[4],
+                            anteriorInferior: v.points[5]
                         };
                         entry.anteriorHeight = v.anteriorHeight;
+                        entry.middleHeight = v.middleHeight;
                         entry.posteriorHeight = v.posteriorHeight;
                         const fractureType = checkVertebraAbnormal(v);
                         entry.anteriorWedgingFracture = fractureType === 'anteriorWedging';
@@ -1553,8 +1607,8 @@
                     report += `${v.name}: 邊界椎體 (${v.boundaryType === 'upper' ? '上終板' : '下終板'})\n`;
                 } else {
                     const abnormal = checkVertebraAbnormal(v);
-                    report += `${v.name}: 前緣 ${v.anteriorHeight?.toFixed(1)}px / 後緣 ${v.posteriorHeight?.toFixed(1)}px`;
-                    report += ` (${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}%)`;
+                    report += `${v.name}: 前緣 ${v.anteriorHeight?.toFixed(1)}px / 中間 ${v.middleHeight?.toFixed(1)}px / 後緣 ${v.posteriorHeight?.toFixed(1)}px`;
+                    report += ` (前/後 ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}%)`;
                     if (abnormal === 'anteriorWedging') report += ` ⚠️ Anterior Wedging Fracture`;
                     if (abnormal === 'crushDeformity') report += ` ⚠️ Crush Deformity Fracture`;
                     report += `\n`;
