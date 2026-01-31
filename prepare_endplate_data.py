@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-椎體頂點檢測數據準備腳本 V2.1
+椎體頂點檢測數據準備腳本 V2.2
 Vertebra Corner Detection Data Preparation Script
 
 支援格式:
-- V2.1: 邊界椎體僅需 2 點 (S1/T1=上終板, T12/C2=下終板)
+- V2.2: 每個終板含中點 (完整椎體 6 點, 邊界椎體 3 點)
+- V2.1: 邊界椎體僅需 2 點 (S1/T1=上終板, T12/C2=下終板) (向下相容)
 - V2.0: 每個椎體 4 個頂點 (向下相容)
 - V1.0: 終板格式 (自動轉換)
 """
@@ -100,7 +101,7 @@ class VertebraDataPreparer:
         if boundary_type:
             return boundary_type
 
-        # 如果有完整 4 點 (V2.0 格式)，即使名稱是邊界椎體也當完整處理
+        # 如果有完整 4+ 點 (V2.0/V2.2 格式)，即使名稱是邊界椎體也當完整處理
         if points and isinstance(points, dict):
             has_all_4 = all(k in points for k in
                 ['anteriorSuperior', 'posteriorSuperior', 'posteriorInferior', 'anteriorInferior'])
@@ -118,10 +119,11 @@ class VertebraDataPreparer:
         return None
 
     def validate_v2_annotation(self, data):
-        """驗證 V2.0/V2.1 標註資料格式（椎體頂點）
+        """驗證 V2.0/V2.1/V2.2 標註資料格式（椎體頂點）
 
         V2.0: 每個椎體 4 點
         V2.1: 邊界椎體可以只有 2 點
+        V2.2: 每個終板含中點 (完整椎體 6 點, 邊界椎體 3 點)
         """
         # 檢查必要欄位
         if 'vertebrae' not in data:
@@ -143,7 +145,7 @@ class VertebraDataPreparer:
 
             if isinstance(points, dict):
                 if boundary:
-                    # 邊界椎體只需 2 點
+                    # 邊界椎體至少需 2 點 (V2.1) 或 3 點 (V2.2)
                     if boundary == 'upper':
                         required = ['anteriorSuperior', 'posteriorSuperior']
                     else:
@@ -151,7 +153,7 @@ class VertebraDataPreparer:
                     if not all(k in points for k in required):
                         return False
                 else:
-                    # 完整椎體需 4 點
+                    # 完整椎體至少需 4 點 (V2.0) 或 6 點 (V2.2)
                     required = ['anteriorSuperior', 'posteriorSuperior',
                                'posteriorInferior', 'anteriorInferior']
                     if not all(k in points for k in required):
@@ -161,7 +163,7 @@ class VertebraDataPreparer:
                     if len(points) < 2:
                         return False
                 else:
-                    if len(points) != 4:
+                    if len(points) < 4:
                         return False
             else:
                 return False
@@ -269,7 +271,7 @@ class VertebraDataPreparer:
     def calculate_vertebra_metrics(self, vertebra, spine_type='L'):
         """計算椎體指標
 
-        邊界椎體 (S1/T1/T12/C2) 只有 2 點，無法計算高度比，
+        邊界椎體 (S1/T1/T12/C2) 只有 2-3 點，無法計算高度比，
         返回 None 用於高度和骨折判斷。
         """
         points = vertebra['points']
@@ -278,23 +280,33 @@ class VertebraDataPreparer:
         boundary = self.is_boundary_vertebra(name, spine_type, bt, points)
 
         if boundary:
-            # 邊界椎體只有 2 點，無法計算前後緣高度
+            # 邊界椎體只有 2-3 點，無法計算前後緣高度
             return {
                 'anteriorHeight': None,
+                'middleHeight': None,
                 'posteriorHeight': None,
                 'heightRatio': None,
                 'compressionFracture': False,
                 'boundary': boundary
             }
 
-        # 完整椎體 - 4 點
+        # 完整椎體 - 4 點 (V2.0) 或 6 點 (V2.2)
         if isinstance(points, dict):
             ant_sup = points['anteriorSuperior']
             post_sup = points['posteriorSuperior']
             post_inf = points['posteriorInferior']
             ant_inf = points['anteriorInferior']
+            mid_sup = points.get('middleSuperior', None)
+            mid_inf = points.get('middleInferior', None)
         else:
-            ant_sup, post_sup, post_inf, ant_inf = points
+            if len(points) >= 6:
+                # V2.2: [AS, MS, PS, PI, MI, AI]
+                ant_sup, mid_sup, post_sup, post_inf, mid_inf, ant_inf = points[:6]
+            else:
+                # V2.0: [AS, PS, PI, AI]
+                ant_sup, post_sup, post_inf, ant_inf = points[:4]
+                mid_sup = None
+                mid_inf = None
 
         # 前緣高度
         anterior_height = np.sqrt(
@@ -308,12 +320,21 @@ class VertebraDataPreparer:
             (post_inf['y'] - post_sup['y'])**2
         )
 
+        # 中間高度 (V2.2)
+        middle_height = None
+        if mid_sup and mid_inf:
+            middle_height = np.sqrt(
+                (mid_inf['x'] - mid_sup['x'])**2 +
+                (mid_inf['y'] - mid_sup['y'])**2
+            )
+
         # 骨折判斷
         anterior_wedging = anterior_height < posterior_height * 0.75
         crush_deformity = anterior_height > posterior_height * 1.25
 
         return {
             'anteriorHeight': anterior_height,
+            'middleHeight': middle_height,
             'posteriorHeight': posterior_height,
             'heightRatio': anterior_height / posterior_height if posterior_height > 0 else 0,
             'compressionFracture': anterior_wedging,  # 向下相容
@@ -323,39 +344,55 @@ class VertebraDataPreparer:
         }
 
     def get_lower_endplate(self, vertebra, spine_type='L'):
-        """取得椎體的下終板 (anteriorInferior, posteriorInferior)
+        """取得椎體的下終板 (anterior, [middle], posterior)
 
-        完整椎體: 取 anteriorInferior + posteriorInferior
-        上邊界椎體 (S1/T1): 上終板就是椎體的 anteriorSuperior + posteriorSuperior
-            → 此椎體沒有下終板，不應呼叫此方法
-        下邊界椎體 (T12/C2): 只有下終板 → anteriorInferior + posteriorInferior
+        V2.2: 返回 (anterior, middle, posterior) 3 點
+        V2.0/V2.1: 返回 (anterior, None, posterior)，middle 為 None
+
+        完整椎體: 取 anteriorInferior + [middleInferior] + posteriorInferior
+        下邊界椎體 (T12/C2): 只有下終板 → anteriorInferior + [middleInferior] + posteriorInferior
+        上邊界椎體 (S1/T1): 沒有下終板，不應呼叫此方法
         """
         points = vertebra['points']
         bt = vertebra.get('boundaryType', None)
         boundary = self.is_boundary_vertebra(vertebra.get('name', ''), spine_type, bt, points)
 
         if isinstance(points, dict):
-            if boundary == 'lower':
-                # T12/C2: 只有下終板的 2 點
-                return points['anteriorInferior'], points['posteriorInferior']
-            else:
-                # 完整椎體或上邊界 (不應對上邊界呼叫此方法)
-                return points['anteriorInferior'], points['posteriorInferior']
+            ant = points.get('anteriorInferior', points.get('anteriorSuperior'))
+            post = points.get('posteriorInferior', points.get('posteriorSuperior'))
+            mid = points.get('middleInferior', None)
+            return ant, mid, post
         else:
-            return points[3], points[2]
+            if len(points) >= 6:
+                # V2.2: [AS, MS, PS, PI, MI, AI]
+                return points[5], points[4], points[3]
+            else:
+                # V2.0: [AS, PS, PI, AI]
+                return points[3], None, points[2]
 
     def get_upper_endplate(self, vertebra, spine_type='L'):
-        """取得椎體的上終板 (anteriorSuperior, posteriorSuperior)
+        """取得椎體的上終板 (anterior, [middle], posterior)
 
-        完整椎體: 取 anteriorSuperior + posteriorSuperior
-        上邊界椎體 (S1/T1): 只有上終板 → anteriorSuperior + posteriorSuperior
-        下邊界椎體 (T12/C2): 只有下終板 → 不應呼叫此方法
+        V2.2: 返回 (anterior, middle, posterior) 3 點
+        V2.0/V2.1: 返回 (anterior, None, posterior)，middle 為 None
+
+        完整椎體: 取 anteriorSuperior + [middleSuperior] + posteriorSuperior
+        上邊界椎體 (S1/T1): 只有上終板 → anteriorSuperior + [middleSuperior] + posteriorSuperior
+        下邊界椎體 (T12/C2): 沒有上終板，不應呼叫此方法
         """
         points = vertebra['points']
         if isinstance(points, dict):
-            return points['anteriorSuperior'], points['posteriorSuperior']
+            ant = points.get('anteriorSuperior')
+            post = points.get('posteriorSuperior')
+            mid = points.get('middleSuperior', None)
+            return ant, mid, post
         else:
-            return points[0], points[1]
+            if len(points) >= 6:
+                # V2.2: [AS, MS, PS, PI, MI, AI]
+                return points[0], points[1], points[2]
+            else:
+                # V2.0: [AS, PS, PI, AI]
+                return points[0], None, points[1]
 
     def calculate_disc_metrics(self, upper_vertebra, lower_vertebra, spine_type='L'):
         """計算椎間盤指標
@@ -363,12 +400,11 @@ class VertebraDataPreparer:
         椎間盤位於 upper_vertebra 的下終板 與 lower_vertebra 的上終板 之間。
         注意：此處的 upper/lower 指的是解剖學上方/下方（按標註順序排列）。
 
-        對於 L-spine: upper=上方椎體(如L5), lower=下方椎體(如S1)
-        disc 的 upper endplate = upper_vertebra 的下終板
-        disc 的 lower endplate = lower_vertebra 的上終板
+        V2.2: 使用實際中點距離計算 middleHeight，避免凹陷終板重疊問題
+        V2.0/V2.1: middleHeight 為前後平均值（向下相容）
         """
-        upper_ant_inf, upper_post_inf = self.get_lower_endplate(upper_vertebra, spine_type)
-        lower_ant_sup, lower_post_sup = self.get_upper_endplate(lower_vertebra, spine_type)
+        upper_ant_inf, upper_mid_inf, upper_post_inf = self.get_lower_endplate(upper_vertebra, spine_type)
+        lower_ant_sup, lower_mid_sup, lower_post_sup = self.get_upper_endplate(lower_vertebra, spine_type)
 
         # 椎間盤前方高度
         anterior_height = np.sqrt(
@@ -382,8 +418,14 @@ class VertebraDataPreparer:
             (lower_post_sup['y'] - upper_post_inf['y'])**2
         )
 
-        # 平均高度
-        middle_height = (anterior_height + posterior_height) / 2
+        # 中間高度: V2.2 使用實際中點距離，否則取平均值
+        if upper_mid_inf and lower_mid_sup:
+            middle_height = np.sqrt(
+                (lower_mid_sup['x'] - upper_mid_inf['x'])**2 +
+                (lower_mid_sup['y'] - upper_mid_inf['y'])**2
+            )
+        else:
+            middle_height = (anterior_height + posterior_height) / 2
 
         # Wedge angle
         upper_angle = np.arctan2(
@@ -600,7 +642,12 @@ class VertebraDataPreparer:
                     mid_x = (pts['posteriorSuperior']['x'] + pts['posteriorInferior']['x']) / 2
                     mid_y = (pts['posteriorSuperior']['y'] + pts['posteriorInferior']['y']) / 2
             else:
-                if len(pts) >= 4:
+                if len(pts) >= 6:
+                    # V2.2: [AS, MS, PS, PI, MI, AI] → posterior = pts[2], pts[3]
+                    mid_x = (pts[2]['x'] + pts[3]['x']) / 2
+                    mid_y = (pts[2]['y'] + pts[3]['y']) / 2
+                elif len(pts) >= 4:
+                    # V2.0: [AS, PS, PI, AI] → posterior = pts[1], pts[2]
                     mid_x = (pts[1]['x'] + pts[2]['x']) / 2
                     mid_y = (pts[1]['y'] + pts[2]['y']) / 2
                 elif len(pts) >= 2:
