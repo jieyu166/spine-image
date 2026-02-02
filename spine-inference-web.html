@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>脊椎椎體偵測 - AI 推理</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Microsoft JhengHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 15px;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 { font-size: 22px; }
+        .header-info { font-size: 13px; opacity: 0.9; }
+
+        .spine-type-selector { display: flex; gap: 10px; }
+
+        .spine-type-btn {
+            padding: 10px 25px;
+            border: 2px solid white;
+            background: transparent;
+            color: white;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .spine-type-btn.active { background: white; color: #16213e; }
+        .spine-type-btn:hover:not(.active) { background: rgba(255,255,255,0.2); }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            min-height: calc(100vh - 150px);
+        }
+
+        /* ===== 左側影像區 ===== */
+        .image-section {
+            padding: 15px;
+            background: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .toolbar {
+            display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; align-items: center;
+        }
+        .toolbar-group {
+            display: flex; gap: 5px; padding: 5px 10px;
+            background: white; border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        button {
+            padding: 8px 15px; border: none; border-radius: 6px;
+            font-size: 13px; cursor: pointer; transition: all 0.2s;
+            display: flex; align-items: center; gap: 5px;
+        }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-primary:hover { background: #2980b9; }
+        .btn-primary:disabled { background: #95a5a6; cursor: not-allowed; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-success:hover { background: #229954; }
+        .btn-secondary { background: #ecf0f1; color: #2c3e50; }
+        .btn-secondary:hover { background: #d5dbdb; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn-warning:hover { background: #e67e22; }
+
+        .canvas-container {
+            flex: 1; position: relative;
+            background: #2c3e50; border-radius: 8px; overflow: hidden;
+            display: flex; align-items: center; justify-content: center;
+            min-height: 500px;
+        }
+
+        #resultCanvas {
+            max-width: 100%; max-height: 100%;
+            object-fit: contain;
+        }
+
+        /* 上傳區 */
+        .upload-zone {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: #95a5a6; font-size: 18px;
+            border: 3px dashed #7f8c8d; border-radius: 8px; margin: 20px;
+            cursor: pointer; transition: all 0.3s;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #3498db; color: #3498db; background: rgba(52,152,219,0.05);
+        }
+        .upload-zone.hidden { display: none; }
+        .upload-icon { font-size: 60px; margin-bottom: 15px; }
+
+        /* Loading */
+        .loading-overlay {
+            position: absolute; inset: 0;
+            background: rgba(0,0,0,0.6);
+            display: none; align-items: center; justify-content: center;
+            flex-direction: column; color: white; font-size: 16px;
+            border-radius: 8px; z-index: 10;
+        }
+        .loading-overlay.active { display: flex; }
+        .spinner {
+            width: 50px; height: 50px;
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 15px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ===== 右側側欄 ===== */
+        .sidebar {
+            padding: 15px;
+            overflow-y: auto;
+            border-left: 2px solid #ecf0f1;
+        }
+        .section { margin-bottom: 15px; }
+        .section-title {
+            font-size: 14px; font-weight: bold; color: #2c3e50;
+            padding-bottom: 8px; border-bottom: 2px solid #3498db;
+            margin-bottom: 10px;
+        }
+
+        /* 狀態卡片 */
+        .status-card {
+            padding: 12px; border-radius: 8px; margin-bottom: 8px;
+            background: #f8f9fa; border-left: 4px solid #3498db;
+        }
+        .status-card.success { border-left-color: #27ae60; }
+        .status-card.warning { border-left-color: #f39c12; }
+        .status-card.danger { border-left-color: #dc3545; }
+
+        .status-card .title { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
+        .status-card .detail { font-size: 12px; color: #666; }
+
+        /* 椎體卡片 */
+        .vertebra-card {
+            padding: 10px; border-radius: 6px; margin-bottom: 6px;
+            background: #f8f9fa; border: 1px solid #e9ecef;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .vertebra-card .name { font-weight: bold; font-size: 14px; }
+        .vertebra-card .badge {
+            padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;
+        }
+        .badge-ok { background: #d4edda; color: #155724; }
+        .badge-boundary { background: #d1ecf1; color: #0c5460; }
+        .badge-fracture { background: #f8d7da; color: #721c24; }
+
+        .ratio-bar {
+            height: 6px; border-radius: 3px; background: #e9ecef; margin-top: 4px;
+            position: relative; overflow: hidden;
+        }
+        .ratio-fill {
+            height: 100%; border-radius: 3px; transition: width 0.3s;
+        }
+        .ratio-fill.normal { background: #27ae60; }
+        .ratio-fill.warning { background: #f39c12; }
+        .ratio-fill.danger { background: #dc3545; }
+
+        /* 椎間盤列表 */
+        .disc-item {
+            padding: 8px; margin-bottom: 4px; background: #f8f9fa;
+            border-radius: 4px; font-size: 12px;
+            display: flex; justify-content: space-between;
+        }
+
+        /* 空狀態 */
+        .empty-state {
+            text-align: center; color: #95a5a6; padding: 30px;
+            font-size: 14px;
+        }
+
+        /* View toggle */
+        .view-toggle {
+            display: flex; gap: 2px; background: #ecf0f1; border-radius: 6px; padding: 2px;
+        }
+        .view-btn {
+            padding: 6px 12px; border: none; border-radius: 4px;
+            background: transparent; cursor: pointer; font-size: 12px;
+            transition: all 0.2s;
+        }
+        .view-btn.active { background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+        /* Confidence meter */
+        .confidence-meter {
+            display: flex; align-items: center; gap: 8px; margin: 8px 0;
+        }
+        .confidence-bar {
+            flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;
+        }
+        .confidence-fill { height: 100%; border-radius: 4px; background: #3498db; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div>
+                <h1>脊椎椎體偵測 AI</h1>
+                <div class="header-info" id="modelStatus">Loading model...</div>
+            </div>
+            <div class="spine-type-selector">
+                <button class="spine-type-btn active" data-type="L" onclick="setSpineType('L')">L-Spine 腰椎</button>
+                <button class="spine-type-btn" data-type="C" onclick="setSpineType('C')">C-Spine 頸椎</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Left: Image -->
+            <div class="image-section">
+                <div class="toolbar">
+                    <div class="toolbar-group">
+                        <button class="btn-primary" onclick="document.getElementById('fileInput').click()">
+                            📂 載入影像
+                        </button>
+                        <button class="btn-success" id="btnAnalyze" onclick="analyze()" disabled>
+                            🔍 分析
+                        </button>
+                    </div>
+                    <div class="toolbar-group view-toggle">
+                        <button class="view-btn active" id="viewResult" onclick="setView('result')">角點結果</button>
+                        <button class="view-btn" id="viewHeatmap" onclick="setView('heatmap')">熱圖</button>
+                        <button class="view-btn" id="viewOriginal" onclick="setView('original')">原圖</button>
+                    </div>
+                </div>
+
+                <div class="canvas-container">
+                    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                        <div class="upload-icon">📷</div>
+                        <div>拖曳影像到此處，或點擊選擇檔案</div>
+                        <div style="font-size: 13px; margin-top: 8px; color: #bdc3c7;">
+                            支援 PNG / JPG / DICOM &nbsp;|&nbsp; 也可 Ctrl+V 貼上
+                        </div>
+                    </div>
+                    <img id="resultCanvas" style="display:none;">
+                    <div class="loading-overlay" id="loadingOverlay">
+                        <div class="spinner"></div>
+                        <div>模型推理中...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Sidebar -->
+            <div class="sidebar">
+                <!-- 摘要 -->
+                <div class="section">
+                    <div class="section-title">📊 偵測摘要</div>
+                    <div id="summaryPanel">
+                        <div class="empty-state">上傳影像後點擊「分析」</div>
+                    </div>
+                </div>
+
+                <!-- 椎體列表 -->
+                <div class="section">
+                    <div class="section-title">🦴 椎體列表</div>
+                    <div id="vertebraList">
+                        <div class="empty-state">尚無資料</div>
+                    </div>
+                </div>
+
+                <!-- 椎間盤 -->
+                <div class="section">
+                    <div class="section-title">💿 椎間盤分析</div>
+                    <div id="discList">
+                        <div class="empty-state">尚無資料</div>
+                    </div>
+                </div>
+
+                <!-- 異常 -->
+                <div class="section">
+                    <div class="section-title">⚠️ 異常警示</div>
+                    <div id="alertList">
+                        <div class="empty-state">尚無資料</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="fileInput" accept="image/*,.dcm" style="display:none;" onchange="handleFile(event)">
+
+    <script>
+        const API_BASE = window.location.origin;
+        let spineType = 'L';
+        let currentFile = null;
+        let resultData = null;
+
+        // ==================== Init ====================
+        window.onload = async function() {
+            // Check model health
+            try {
+                const resp = await fetch(`${API_BASE}/health`);
+                const data = await resp.json();
+                document.getElementById('modelStatus').textContent =
+                    data.model_loaded ? 'Model ready' : 'Model not loaded';
+            } catch(e) {
+                document.getElementById('modelStatus').textContent = 'API not reachable';
+            }
+
+            // Paste handler
+            document.addEventListener('paste', handlePaste);
+
+            // Drag & drop
+            const zone = document.getElementById('uploadZone');
+            zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+            zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+            zone.addEventListener('drop', e => {
+                e.preventDefault();
+                zone.classList.remove('dragover');
+                if (e.dataTransfer.files.length > 0) {
+                    loadFile(e.dataTransfer.files[0]);
+                }
+            });
+        };
+
+        // ==================== Spine Type ====================
+        function setSpineType(type) {
+            spineType = type;
+            document.querySelectorAll('.spine-type-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.type === type);
+            });
+        }
+
+        // ==================== File Loading ====================
+        function handleFile(event) {
+            if (event.target.files.length > 0) loadFile(event.target.files[0]);
+        }
+
+        function handlePaste(event) {
+            const items = event.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    loadFile(item.getAsFile());
+                    return;
+                }
+            }
+        }
+
+        function loadFile(file) {
+            currentFile = file;
+            resultData = null;
+
+            const img = document.getElementById('resultCanvas');
+            const isDicom = file.name.toLowerCase().endsWith('.dcm');
+
+            if (isDicom) {
+                // DICOM: 瀏覽器無法預覽，顯示提示
+                img.src = '';
+                img.style.display = 'none';
+                document.getElementById('uploadZone').classList.add('hidden');
+                // 顯示檔名提示
+                const container = document.querySelector('.canvas-container');
+                let hint = document.getElementById('dicomHint');
+                if (!hint) {
+                    hint = document.createElement('div');
+                    hint.id = 'dicomHint';
+                    hint.style.cssText = 'color:#95a5a6;font-size:16px;text-align:center;';
+                    container.appendChild(hint);
+                }
+                hint.textContent = `DICOM: ${file.name} — 點擊「分析」載入`;
+                hint.style.display = 'block';
+            } else {
+                // PNG/JPG: 可直接預覽
+                const reader = new FileReader();
+                reader.onload = e => {
+                    img.src = e.target.result;
+                    img.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+                document.getElementById('uploadZone').classList.add('hidden');
+                const hint = document.getElementById('dicomHint');
+                if (hint) hint.style.display = 'none';
+            }
+
+            document.getElementById('btnAnalyze').disabled = false;
+
+            // Reset panels
+            document.getElementById('summaryPanel').innerHTML = '<div class="empty-state">點擊「分析」開始偵測</div>';
+            document.getElementById('vertebraList').innerHTML = '';
+            document.getElementById('discList').innerHTML = '';
+            document.getElementById('alertList').innerHTML = '';
+        }
+
+        // ==================== View Toggle ====================
+        function setView(view) {
+            document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('view' + view.charAt(0).toUpperCase() + view.slice(1)).classList.add('active');
+
+            if (!resultData) return;
+            const img = document.getElementById('resultCanvas');
+            if (view === 'result') img.src = resultData.result_image;
+            else if (view === 'heatmap') img.src = resultData.heatmap_image;
+            else if (view === 'original') img.src = resultData._original_src;
+        }
+
+        // ==================== Analyze ====================
+        async function analyze() {
+            if (!currentFile) return;
+
+            const loading = document.getElementById('loadingOverlay');
+            loading.classList.add('active');
+            document.getElementById('btnAnalyze').disabled = true;
+
+            try {
+                const formData = new FormData();
+                formData.append('file', currentFile);
+                formData.append('spine_type', spineType);
+
+                const resp = await fetch(`${API_BASE}/api/predict`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.detail || 'API error');
+                }
+
+                resultData = await resp.json();
+                // Use server-returned original (supports DICOM)
+                resultData._original_src = resultData.original_image;
+
+                // Show result image
+                const img = document.getElementById('resultCanvas');
+                img.src = resultData.result_image;
+                img.style.display = 'block';
+                // Hide DICOM hint if present
+                const hint = document.getElementById('dicomHint');
+                if (hint) hint.style.display = 'none';
+                setView('result');
+
+                // Update panels
+                renderSummary(resultData);
+                renderVertebrae(resultData.vertebrae);
+                renderDiscs(resultData.discs);
+                renderAlerts(resultData.vertebrae);
+
+            } catch(e) {
+                alert('分析失敗: ' + e.message);
+            } finally {
+                loading.classList.remove('active');
+                document.getElementById('btnAnalyze').disabled = false;
+            }
+        }
+
+        // ==================== Render Panels ====================
+        function renderSummary(data) {
+            const pct = Math.round(data.count_confidence * 100);
+            const fractures = data.vertebrae.filter(v =>
+                v.anteriorWedgingFracture || v.crushDeformityFracture);
+
+            let html = `
+                <div class="status-card ${fractures.length > 0 ? 'danger' : 'success'}">
+                    <div class="title">${data.spine_type === 'L' ? '腰椎' : '頸椎'} - 偵測到 ${data.predicted_count} 個椎體</div>
+                    <div class="confidence-meter">
+                        <span style="font-size:12px;">信心度</span>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width:${pct}%"></div>
+                        </div>
+                        <span style="font-size:12px;font-weight:bold;">${pct}%</span>
+                    </div>
+                    <div class="detail">
+                        椎間盤: ${data.discs.length} 個 &nbsp;|&nbsp;
+                        骨折警示: ${fractures.length > 0 ? fractures.map(f => f.name).join(', ') : '無'}
+                    </div>
+                </div>
+            `;
+            document.getElementById('summaryPanel').innerHTML = html;
+        }
+
+        function renderVertebrae(vertebrae) {
+            if (!vertebrae || vertebrae.length === 0) {
+                document.getElementById('vertebraList').innerHTML = '<div class="empty-state">未偵測到椎體</div>';
+                return;
+            }
+
+            let html = '';
+            vertebrae.forEach(v => {
+                const isBoundary = !!v.boundaryType;
+                const isAW = v.anteriorWedgingFracture;
+                const isCrush = v.crushDeformityFracture;
+                const isFracture = isAW || isCrush;
+
+                let badgeClass = 'badge-ok';
+                let badgeText = '✓ 正常';
+                if (isBoundary) { badgeClass = 'badge-boundary'; badgeText = v.boundaryType === 'upper' ? '上終板' : '下終板'; }
+                if (isAW) { badgeClass = 'badge-fracture'; badgeText = '⚠ Anterior Wedging'; }
+                if (isCrush) { badgeClass = 'badge-fracture'; badgeText = '⚠ Crush Deformity'; }
+
+                let ratioHtml = '';
+                if (v.heightRatio != null) {
+                    const pct = Math.min(v.heightRatio * 100 / 1.5, 100);
+                    let fillClass = 'normal';
+                    if (v.heightRatio < 0.75) fillClass = 'danger';
+                    else if (v.heightRatio > 1.25) fillClass = 'danger';
+                    else if (v.heightRatio < 0.85 || v.heightRatio > 1.15) fillClass = 'warning';
+
+                    ratioHtml = `
+                        <div style="font-size:11px; color:#888; margin-top:2px;">
+                            A/P: ${v.heightRatio.toFixed(2)}
+                            (前緣 ${v.anteriorHeight?.toFixed(0)}px / 後緣 ${v.posteriorHeight?.toFixed(0)}px)
+                        </div>
+                        <div class="ratio-bar">
+                            <div class="ratio-fill ${fillClass}" style="width:${pct}%"></div>
+                        </div>
+                    `;
+                }
+
+                html += `
+                    <div class="vertebra-card">
+                        <div style="flex:1;">
+                            <div class="name">${v.name}</div>
+                            ${ratioHtml}
+                        </div>
+                        <span class="badge ${badgeClass}">${badgeText}</span>
+                    </div>
+                `;
+            });
+            document.getElementById('vertebraList').innerHTML = html;
+        }
+
+        function renderDiscs(discs) {
+            if (!discs || discs.length === 0) {
+                document.getElementById('discList').innerHTML = '<div class="empty-state">無椎間盤資料</div>';
+                return;
+            }
+            let html = '';
+            discs.forEach(d => {
+                html += `
+                    <div class="disc-item">
+                        <span style="font-weight:bold;">${d.level}</span>
+                        <span>前 ${d.anteriorHeight.toFixed(0)} / 後 ${d.posteriorHeight.toFixed(0)} px</span>
+                    </div>
+                `;
+            });
+            document.getElementById('discList').innerHTML = html;
+        }
+
+        function renderAlerts(vertebrae) {
+            const alerts = [];
+            vertebrae.forEach(v => {
+                if (v.anteriorWedgingFracture) {
+                    alerts.push({
+                        type: 'danger',
+                        title: `${v.name} — Anterior Wedging Fracture`,
+                        detail: `前緣/後緣比: ${(v.heightRatio * 100).toFixed(0)}% (< 75%)`
+                    });
+                }
+                if (v.crushDeformityFracture) {
+                    alerts.push({
+                        type: 'danger',
+                        title: `${v.name} — Crush Deformity Fracture`,
+                        detail: `前緣/後緣比: ${(v.heightRatio * 100).toFixed(0)}% (> 125%)`
+                    });
+                }
+            });
+
+            if (alerts.length === 0) {
+                document.getElementById('alertList').innerHTML =
+                    '<div class="status-card success"><div class="title">✅ 未發現明顯異常</div></div>';
+                return;
+            }
+
+            let html = '';
+            alerts.forEach(a => {
+                html += `
+                    <div class="status-card ${a.type}">
+                        <div class="title">${a.title}</div>
+                        <div class="detail">${a.detail}</div>
+                    </div>
+                `;
+            });
+            document.getElementById('alertList').innerHTML = html;
+        }
+    </script>
+</body>
+</html>

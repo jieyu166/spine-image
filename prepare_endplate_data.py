@@ -328,15 +328,15 @@ class VertebraDataPreparer:
                 (mid_inf['y'] - mid_sup['y'])**2
             )
 
-        # 骨折判斷
-        anterior_wedging = anterior_height < posterior_height * 0.75
-        crush_deformity = anterior_height > posterior_height * 1.25
+        # 骨折判斷 (cast to Python native types for JSON serialization)
+        anterior_wedging = bool(anterior_height < posterior_height * 0.75)
+        crush_deformity = bool(anterior_height > posterior_height * 1.25)
 
         return {
-            'anteriorHeight': anterior_height,
-            'middleHeight': middle_height,
-            'posteriorHeight': posterior_height,
-            'heightRatio': anterior_height / posterior_height if posterior_height > 0 else 0,
+            'anteriorHeight': float(anterior_height),
+            'middleHeight': float(middle_height) if middle_height is not None else None,
+            'posteriorHeight': float(posterior_height),
+            'heightRatio': float(anterior_height / posterior_height) if posterior_height > 0 else 0,
             'compressionFracture': anterior_wedging,  # 向下相容
             'anteriorWedging': anterior_wedging,
             'crushDeformity': crush_deformity,
@@ -441,10 +441,10 @@ class VertebraDataPreparer:
             wedge_angle = 180 - wedge_angle
 
         return {
-            'anteriorHeight': anterior_height,
-            'posteriorHeight': posterior_height,
-            'middleHeight': middle_height,
-            'wedgeAngle': wedge_angle
+            'anteriorHeight': float(anterior_height),
+            'posteriorHeight': float(posterior_height),
+            'middleHeight': float(middle_height),
+            'wedgeAngle': float(wedge_angle)
         }
 
     def prepare_training_data(self, annotations):
@@ -607,13 +607,13 @@ class VertebraDataPreparer:
                 abnormalities['compression_fractures'].append({
                     'vertebra': v['name'],
                     'type': 'anteriorWedging',
-                    'ratio': metrics['heightRatio']
+                    'ratio': float(metrics['heightRatio']) if metrics['heightRatio'] is not None else 0
                 })
             elif metrics.get('crushDeformity'):
                 abnormalities['compression_fractures'].append({
                     'vertebra': v['name'],
                     'type': 'crushDeformity',
-                    'ratio': metrics['heightRatio']
+                    'ratio': float(metrics['heightRatio']) if metrics['heightRatio'] is not None else 0
                 })
 
         # 2. 滑脫檢測（需要至少3個有後緣資訊的椎體）
@@ -696,7 +696,7 @@ class VertebraDataPreparer:
                         abnormalities['listhesis'].append({
                             'vertebra': p['name'],
                             'type': listhesis_type,
-                            'shift_percent': shift_percent
+                            'shift_percent': float(shift_percent)
                         })
 
         # 3. 椎間盤高度遞進檢查
