@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>標註驗證工具 - Annotation Viewer</title>
+    <!-- DICOM parser (cornerstone / daikon lite alternative: simple manual parsing) -->
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Microsoft JhengHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh; padding: 15px;
+        }
+        .container {
+            max-width: 1800px; margin: 0 auto; background: #fff;
+            border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.3); overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white; padding: 18px 20px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .header h1 { font-size: 22px; }
+        .header-info { font-size: 13px; opacity: 0.8; }
+
+        .main-content {
+            display: grid; grid-template-columns: 1fr 400px;
+            min-height: calc(100vh - 130px);
+        }
+
+        /* ===== Left ===== */
+        .image-section { padding: 15px; background: #f0f2f5; display: flex; flex-direction: column; }
+
+        .toolbar {
+            display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; align-items: center;
+        }
+        .toolbar-group {
+            display: flex; gap: 5px; padding: 5px 10px;
+            background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            padding: 8px 15px; border: none; border-radius: 6px;
+            font-size: 13px; cursor: pointer; transition: all 0.2s;
+            display: flex; align-items: center; gap: 5px;
+        }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-primary:hover { background: #2980b9; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-success:hover { background: #229954; }
+        .btn-secondary { background: #ecf0f1; color: #2c3e50; }
+        .btn-secondary:hover { background: #d5dbdb; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn-warning:hover { background: #e67e22; }
+
+        .canvas-container {
+            flex: 1; position: relative;
+            background: #2c3e50; border-radius: 8px; overflow: hidden;
+            min-height: 500px;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+
+        .drop-zone {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: #95a5a6; font-size: 16px;
+            border: 3px dashed #7f8c8d; border-radius: 8px; margin: 20px;
+            cursor: pointer; transition: all 0.3s; z-index: 5;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: #3498db; color: #3498db; background: rgba(52,152,219,0.05);
+        }
+        .drop-zone.hidden { display: none; }
+        .drop-icon { font-size: 50px; margin-bottom: 10px; }
+
+        /* ===== Right ===== */
+        .sidebar { padding: 15px; overflow-y: auto; border-left: 2px solid #ecf0f1; }
+        .section { margin-bottom: 15px; }
+        .section-title {
+            font-size: 14px; font-weight: bold; color: #2c3e50;
+            padding-bottom: 8px; border-bottom: 2px solid #34495e; margin-bottom: 10px;
+        }
+
+        .info-card {
+            padding: 10px; border-radius: 6px; margin-bottom: 6px;
+            background: #f8f9fa; border: 1px solid #e9ecef; font-size: 13px;
+        }
+        .info-card .label { color: #888; font-size: 11px; }
+        .info-card .value { font-weight: bold; }
+
+        .vertebra-card {
+            padding: 10px; border-radius: 6px; margin-bottom: 6px;
+            background: #f8f9fa; border: 1px solid #e9ecef;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .vertebra-card:hover { background: #e8f4fd; border-color: #3498db; }
+        .vertebra-card.active { background: #d4edda; border-color: #27ae60; }
+        .vertebra-card .name { font-weight: bold; font-size: 14px; }
+        .vertebra-card .detail { font-size: 11px; color: #666; margin-top: 3px; }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 12px;
+            font-size: 10px; font-weight: bold;
+        }
+        .badge-ok { background: #d4edda; color: #155724; }
+        .badge-boundary { background: #d1ecf1; color: #0c5460; }
+        .badge-fracture { background: #f8d7da; color: #721c24; }
+
+        .disc-item {
+            padding: 6px 10px; margin-bottom: 3px; background: #f8f9fa;
+            border-radius: 4px; font-size: 12px;
+            display: flex; justify-content: space-between;
+        }
+
+        .empty-state { text-align: center; color: #95a5a6; padding: 20px; font-size: 14px; }
+
+        /* Zoom info */
+        .zoom-info {
+            position: absolute; bottom: 10px; right: 10px;
+            background: rgba(0,0,0,0.6); color: white;
+            padding: 4px 10px; border-radius: 4px; font-size: 12px; z-index: 5;
+        }
+
+        /* Legend */
+        .legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; }
+        .legend-item { display: flex; align-items: center; gap: 4px; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+        /* Toggle */
+        .toggle-group { display: flex; gap: 2px; background: #ecf0f1; border-radius: 6px; padding: 2px; }
+        .toggle-btn {
+            padding: 5px 10px; border: none; border-radius: 4px;
+            background: transparent; cursor: pointer; font-size: 12px; transition: all 0.2s;
+        }
+        .toggle-btn.active { background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+        label.checkbox-label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>標註驗證工具</h1>
+                <div class="header-info" id="statusText">載入影像和 JSON 標註檔來驗證標註是否正確</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Left -->
+            <div class="image-section">
+                <div class="toolbar">
+                    <div class="toolbar-group">
+                        <button class="btn-primary" onclick="pickImage()">📷 載入影像</button>
+                        <button class="btn-success" onclick="pickJson()">📋 載入 JSON</button>
+                    </div>
+                    <div class="toolbar-group">
+                        <button class="btn-secondary" onclick="zoomIn()">🔍+</button>
+                        <button class="btn-secondary" onclick="zoomOut()">🔍-</button>
+                        <button class="btn-secondary" onclick="resetView()">↺ 重置</button>
+                    </div>
+                    <div class="toolbar-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="chkPoints" checked onchange="redraw()"> 角點
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="chkLines" checked onchange="redraw()"> 輪廓
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="chkLabels" checked onchange="redraw()"> 名稱
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="chkDiscs" onchange="redraw()"> 椎間盤
+                        </label>
+                    </div>
+                </div>
+
+                <div class="canvas-container" id="canvasContainer">
+                    <canvas id="mainCanvas"></canvas>
+                    <div class="drop-zone" id="dropZone">
+                        <div class="drop-icon">📂</div>
+                        <div>拖曳影像 + JSON 到此處</div>
+                        <div style="font-size:13px; margin-top:8px; color:#bdc3c7;">
+                            支援 PNG / JPG / DICOM + JSON 標註檔<br>
+                            也可 Ctrl+V 貼上影像
+                        </div>
+                    </div>
+                    <div class="zoom-info" id="zoomInfo">100%</div>
+                </div>
+
+                <div class="legend">
+                    <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b;"></div> 前上 (AS)</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:#51cf66;"></div> 後上 (PS)</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:#339af0;"></div> 後下 (PI)</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:#fcc419;"></div> 前下 (AI)</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:#20c997;"></div> 中點 (M)</div>
+                </div>
+            </div>
+
+            <!-- Right -->
+            <div class="sidebar">
+                <div class="section">
+                    <div class="section-title">📄 檔案資訊</div>
+                    <div id="fileInfo"><div class="empty-state">尚未載入</div></div>
+                </div>
+                <div class="section">
+                    <div class="section-title">🦴 椎體列表</div>
+                    <div id="vertebraList"><div class="empty-state">尚無資料</div></div>
+                </div>
+                <div class="section">
+                    <div class="section-title">💿 椎間盤</div>
+                    <div id="discList"><div class="empty-state">尚無資料</div></div>
+                </div>
+                <div class="section">
+                    <div class="section-title">⚠️ 異常</div>
+                    <div id="alertList"><div class="empty-state">尚無資料</div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="imageInput" accept="image/*,.dcm" style="display:none;" onchange="handleImageFile(event)">
+    <input type="file" id="jsonInput" accept=".json" style="display:none;" onchange="handleJsonFile(event)">
+
+    <script>
+        // ==================== State ====================
+        let canvas, ctx;
+        let originalImage = null; // HTMLImageElement
+        let annotationData = null;
+        let zoom = 1, panX = 0, panY = 0;
+        let scaleX = 1, scaleY = 1; // annotation coord → image coord scaling
+        let isDragging = false, lastMouse = {x:0, y:0};
+        let highlightVertebra = -1;
+
+        // Corner config
+        const CORNER_CONFIG = {
+            anteriorSuperior:  { color: '#ff6b6b', label: 'AS', idx: 0 },
+            posteriorSuperior: { color: '#51cf66', label: 'PS', idx: 1 },
+            posteriorInferior: { color: '#339af0', label: 'PI', idx: 2 },
+            anteriorInferior:  { color: '#fcc419', label: 'AI', idx: 3 },
+            middleSuperior:    { color: '#20c997', label: 'MS', idx: 4 },
+            middleInferior:    { color: '#20c997', label: 'MI', idx: 5 },
+        };
+
+        // ==================== Init ====================
+        window.onload = function() {
+            canvas = document.getElementById('mainCanvas');
+            ctx = canvas.getContext('2d');
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // Mouse events
+            canvas.addEventListener('wheel', handleWheel);
+            canvas.addEventListener('mousedown', e => {
+                if (e.button === 0 || e.button === 1 || e.button === 2) {
+                    isDragging = true; lastMouse = {x: e.clientX, y: e.clientY};
+                    if (e.button !== 0) e.preventDefault();
+                }
+            });
+            canvas.addEventListener('mousemove', e => {
+                if (isDragging) {
+                    panX += e.clientX - lastMouse.x;
+                    panY += e.clientY - lastMouse.y;
+                    lastMouse = {x: e.clientX, y: e.clientY};
+                    redraw();
+                }
+            });
+            canvas.addEventListener('mouseup', () => isDragging = false);
+            canvas.addEventListener('mouseleave', () => isDragging = false);
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+            // Paste
+            document.addEventListener('paste', handlePaste);
+
+            // Drag & drop
+            const zone = document.getElementById('dropZone');
+            const container = document.getElementById('canvasContainer');
+            [zone, container].forEach(el => {
+                el.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+                el.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+                el.addEventListener('drop', e => {
+                    e.preventDefault(); zone.classList.remove('dragover');
+                    handleDroppedFiles(e.dataTransfer.files);
+                });
+            });
+
+            redraw();
+        };
+
+        function resizeCanvas() {
+            const container = document.getElementById('canvasContainer');
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            redraw();
+        }
+
+        // ==================== File Handling ====================
+        function pickImage() { document.getElementById('imageInput').click(); }
+        function pickJson() { document.getElementById('jsonInput').click(); }
+
+        function handleImageFile(event) {
+            if (event.target.files[0]) loadImageFile(event.target.files[0]);
+        }
+        function handleJsonFile(event) {
+            if (event.target.files[0]) loadJsonFile(event.target.files[0]);
+        }
+
+        function handleDroppedFiles(files) {
+            for (const f of files) {
+                const name = f.name.toLowerCase();
+                if (name.endsWith('.json')) {
+                    loadJsonFile(f);
+                } else if (name.endsWith('.dcm') || name.endsWith('.png') ||
+                           name.endsWith('.jpg') || name.endsWith('.jpeg')) {
+                    loadImageFile(f);
+                }
+            }
+        }
+
+        function handlePaste(event) {
+            const items = event.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    loadImageFile(item.getAsFile());
+                    return;
+                }
+            }
+        }
+
+        function loadImageFile(file) {
+            const name = file.name.toLowerCase();
+
+            if (name.endsWith('.dcm')) {
+                // DICOM: 用 ArrayBuffer 手動解碼
+                const reader = new FileReader();
+                reader.onload = e => {
+                    try {
+                        const img = parseDicomToImage(e.target.result);
+                        setImage(img, file.name);
+                    } catch(err) {
+                        alert('DICOM 解碼失敗: ' + err.message);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                // PNG/JPG
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const img = new Image();
+                    img.onload = () => setImage(img, file.name);
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function updateScaleFactors() {
+            // If annotation JSON specifies imageInfo dimensions, compute scale
+            // so annotation coordinates map correctly onto the loaded image
+            scaleX = 1; scaleY = 1;
+            if (originalImage && annotationData && annotationData.imageInfo) {
+                const ai = annotationData.imageInfo;
+                if (ai.width && ai.height) {
+                    scaleX = originalImage.width / ai.width;
+                    scaleY = originalImage.height / ai.height;
+                }
+            }
+        }
+
+        function setImage(img, fileName) {
+            originalImage = img;
+            document.getElementById('dropZone').classList.add('hidden');
+            updateScaleFactors();
+            resetView();
+            updateStatus();
+            renderSidebar(); // refresh size match info
+            redraw();
+        }
+
+        function loadJsonFile(file) {
+            const reader = new FileReader();
+            reader.onload = e => {
+                try {
+                    let raw = JSON.parse(e.target.result);
+                    // Auto-detect format and normalize to V2.x structure
+                    annotationData = normalizeAnnotation(raw);
+                    annotationData._fileName = file.name;
+                    updateScaleFactors();
+                    updateStatus();
+                    renderSidebar();
+                    redraw();
+                } catch(err) {
+                    alert('JSON 解析失敗: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // ==================== Format Normalization ====================
+        function normalizeAnnotation(raw) {
+            // Already V2.x format
+            if (raw.version && raw.vertebrae) return raw;
+
+            // V1 format: has "measurements" array + "vertebra_edges"
+            if (raw.measurements && Array.isArray(raw.measurements)) {
+                return convertV1ToV2(raw);
+            }
+
+            // Inference result format: has "endplate_lines" + "angles"
+            if (raw.endplate_lines && raw.angles) {
+                return convertInferenceToV2(raw);
+            }
+
+            // Unknown format — return as-is with warning
+            console.warn('Unknown JSON annotation format', Object.keys(raw));
+            return raw;
+        }
+
+        function convertV1ToV2(v1) {
+            // V1 has: measurements[] with level (disc), lowerEndplate[2pts], upperEndplate[2pts]
+            //         vertebra_edges{name: {anterior[2pts], posterior[2pts]}}
+            // Each endplate point is {x, y}, 2 points = [anterior, posterior] of endplate line
+
+            const result = {
+                version: '1.0 (converted)',
+                spineType: v1.spine_type || 'L',
+                imageInfo: v1.image_dimensions ? {
+                    width: v1.image_dimensions.width,
+                    height: v1.image_dimensions.height
+                } : null,
+                exportDate: v1.annotation_date,
+                vertebrae: [],
+                discs: [],
+                abnormalities: {}
+            };
+
+            // Build vertebrae from vertebra_edges
+            // V1 vertebra_edges: { "L1": { anterior: [{x,y},{x,y}], posterior: [{x,y},{x,y}] } }
+            // anterior[0] = upper anterior, anterior[1] = lower anterior
+            // posterior[0] = upper posterior, posterior[1] = lower posterior
+            if (v1.vertebra_edges) {
+                // Determine vertebra order from measurements (disc levels)
+                const vertebraNames = new Set();
+                (v1.measurements || []).forEach(m => {
+                    const parts = m.level.split('/');
+                    parts.forEach(p => vertebraNames.add(p));
+                });
+
+                // Sort vertebra names anatomically
+                const nameOrder = ['T10','T11','T12','L1','L2','L3','L4','L5','S1','S2'];
+                const sortedNames = [...vertebraNames].sort((a, b) => {
+                    return nameOrder.indexOf(a) - nameOrder.indexOf(b);
+                });
+
+                sortedNames.forEach(name => {
+                    const edges = v1.vertebra_edges[name];
+                    if (!edges) return;
+
+                    const vData = { name, boundaryType: null, hasMiddlePoints: false, points: {} };
+
+                    // anterior[0] = upper, anterior[1] = lower
+                    // posterior[0] = upper, posterior[1] = lower
+                    if (edges.anterior && edges.anterior[0]) {
+                        vData.points.anteriorSuperior = { x: edges.anterior[0].x, y: edges.anterior[0].y };
+                    }
+                    if (edges.anterior && edges.anterior[1]) {
+                        vData.points.anteriorInferior = { x: edges.anterior[1].x, y: edges.anterior[1].y };
+                    }
+                    if (edges.posterior && edges.posterior[0]) {
+                        vData.points.posteriorSuperior = { x: edges.posterior[0].x, y: edges.posterior[0].y };
+                    }
+                    if (edges.posterior && edges.posterior[1]) {
+                        vData.points.posteriorInferior = { x: edges.posterior[1].x, y: edges.posterior[1].y };
+                    }
+
+                    // Calculate heights
+                    if (vData.points.anteriorSuperior && vData.points.anteriorInferior) {
+                        const dx = vData.points.anteriorInferior.x - vData.points.anteriorSuperior.x;
+                        const dy = vData.points.anteriorInferior.y - vData.points.anteriorSuperior.y;
+                        vData.anteriorHeight = Math.sqrt(dx*dx + dy*dy);
+                    }
+                    if (vData.points.posteriorSuperior && vData.points.posteriorInferior) {
+                        const dx = vData.points.posteriorInferior.x - vData.points.posteriorSuperior.x;
+                        const dy = vData.points.posteriorInferior.y - vData.points.posteriorSuperior.y;
+                        vData.posteriorHeight = Math.sqrt(dx*dx + dy*dy);
+                    }
+                    if (vData.anteriorHeight && vData.posteriorHeight) {
+                        vData.anteriorWedgingFracture = vData.anteriorHeight < vData.posteriorHeight * 0.75;
+                        vData.crushDeformityFracture = vData.anteriorHeight > vData.posteriorHeight * 1.25;
+                    }
+
+                    result.vertebrae.push(vData);
+                });
+            }
+
+            // Build discs from measurements
+            (v1.measurements || []).forEach(m => {
+                result.discs.push({
+                    level: m.level,
+                    angle: m.angle,
+                    angleRaw: m.angle_raw,
+                    confidence: m.confidence
+                });
+            });
+
+            return result;
+        }
+
+        function convertInferenceToV2(inf) {
+            // Inference result: endplate_lines[{x1,y1,x2,y2}], angles[{level,angle,lower_line,upper_line}]
+            // These coordinates may be in small pixel space (model output), not original image space
+            const result = {
+                version: 'inference (converted)',
+                spineType: 'L',
+                imageInfo: null, // unknown
+                vertebrae: [],
+                discs: []
+            };
+
+            // Each angle defines a disc between two endplate lines
+            // We can reconstruct approximate vertebrae from consecutive endplates
+            // But these are just endplate lines, not full 4-corner vertebrae
+            // Display as line segments instead
+
+            // Build endplate-based display
+            const lines = inf.endplate_lines || [];
+            lines.forEach((line, idx) => {
+                result.vertebrae.push({
+                    name: `Endplate ${idx + 1}`,
+                    boundaryType: null,
+                    hasMiddlePoints: false,
+                    points: {
+                        anteriorSuperior: { x: line.x1, y: line.y1 },
+                        posteriorSuperior: { x: line.x2, y: line.y2 }
+                    }
+                });
+            });
+
+            (inf.angles || []).forEach(a => {
+                result.discs.push({
+                    level: `Level ${a.level}`,
+                    angle: a.angle
+                });
+            });
+
+            return result;
+        }
+
+        // ==================== Robust DICOM Parser ====================
+        function parseDicomToImage(arrayBuffer) {
+            const view = new DataView(arrayBuffer);
+            const len = arrayBuffer.byteLength;
+
+            // Check DICM magic at offset 128
+            let offset = 128;
+            const magic = String.fromCharCode(view.getUint8(offset), view.getUint8(offset+1),
+                                               view.getUint8(offset+2), view.getUint8(offset+3));
+            if (magic !== 'DICM') throw new Error('Not a valid DICOM file (no DICM header)');
+
+            let rows = 0, cols = 0, bitsAlloc = 16, bitsStored = 16, highBit = 15;
+            let pixelRepresentation = 0;
+            let windowCenter = null, windowWidth = null;
+            let pixelDataOffset = -1, pixelDataLength = 0;
+            let littleEndian = true;
+            let photometricInterp = 'MONOCHROME2';
+            let samplesPerPixel = 1;
+            let rescaleSlope = 1, rescaleIntercept = 0;
+            let transferSyntax = '1.2.840.10008.1.2.1'; // default explicit VR LE
+            let isExplicitVR = true;
+
+            offset = 132;
+
+            // ---- Phase 1: Parse meta header (group 0002, always explicit VR LE) ----
+            let metaEndOffset = len; // default: entire file
+            while (offset < len - 8) {
+                const group = view.getUint16(offset, true); // meta always LE
+                const element = view.getUint16(offset + 2, true);
+
+                if (group !== 0x0002) break; // end of meta header
+
+                offset += 4;
+                const vrStr = String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1));
+                let valueLength;
+
+                if (['OB','OW','OF','SQ','UC','UN','UT','OD','OL'].includes(vrStr)) {
+                    offset += 4;
+                    valueLength = view.getUint32(offset, true);
+                    offset += 4;
+                } else {
+                    offset += 2;
+                    valueLength = view.getUint16(offset, true);
+                    offset += 2;
+                }
+
+                if (valueLength === 0xFFFFFFFF || valueLength > len - offset) {
+                    offset += 0; break;
+                }
+
+                const tag = (group << 16) | element;
+                if (tag === 0x00020010) { // Transfer Syntax UID
+                    transferSyntax = readString(view, offset, valueLength).trim();
+                }
+                if (tag === 0x00020000) { // File Meta Information Group Length
+                    const metaLen = view.getUint32(offset, true);
+                    metaEndOffset = offset + 4 + metaLen; // approximate
+                }
+
+                offset += valueLength;
+            }
+
+            // Determine VR type from transfer syntax
+            // 1.2.840.10008.1.2    = Implicit VR Little Endian
+            // 1.2.840.10008.1.2.1  = Explicit VR Little Endian
+            // 1.2.840.10008.1.2.2  = Explicit VR Big Endian
+            // 1.2.840.10008.1.2.4.x = compressed (JPEG, etc.)
+            if (transferSyntax === '1.2.840.10008.1.2') {
+                isExplicitVR = false;
+                littleEndian = true;
+            } else if (transferSyntax === '1.2.840.10008.1.2.2') {
+                isExplicitVR = true;
+                littleEndian = false;
+            } else if (transferSyntax.startsWith('1.2.840.10008.1.2.4')) {
+                // Compressed transfer syntax — we cannot decode JPEG/JPEG2000/RLE in pure JS easily
+                throw new Error('Compressed DICOM (JPEG/JPEG2000) not supported in browser viewer. Please convert to uncompressed first.');
+            } else {
+                isExplicitVR = true;
+                littleEndian = true;
+            }
+
+            // ---- Phase 2: Parse dataset ----
+            // VR lookup for implicit VR mode (common tags)
+            const IMPLICIT_VR_MAP = {
+                0x00280010: 'US', 0x00280011: 'US', 0x00280100: 'US',
+                0x00280101: 'US', 0x00280102: 'US', 0x00280103: 'US',
+                0x00280002: 'US', 0x00281050: 'DS', 0x00281051: 'DS',
+                0x00281052: 'DS', 0x00281053: 'DS', 0x00280004: 'CS',
+                0x7FE00010: 'OW',
+            };
+
+            while (offset < len - 4) {
+                if (offset + 4 > len) break;
+                const group = view.getUint16(offset, littleEndian);
+                const element = view.getUint16(offset + 2, littleEndian);
+                offset += 4;
+
+                // Skip item delimiters
+                if (group === 0xFFFE) {
+                    // Item/sequence delimiter
+                    let delimLen = 0;
+                    if (offset + 4 <= len) {
+                        delimLen = view.getUint32(offset, littleEndian);
+                        offset += 4;
+                    }
+                    if (delimLen !== 0xFFFFFFFF && delimLen > 0) offset += delimLen;
+                    continue;
+                }
+
+                const tag = (group << 16) | element;
+                let vr = '??';
+                let valueLength;
+
+                if (isExplicitVR) {
+                    // Read VR
+                    if (offset + 2 > len) break;
+                    vr = String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1));
+
+                    if (['OB','OW','OF','SQ','UC','UN','UT','OD','OL','OV','SV','UV'].includes(vr)) {
+                        offset += 4; // VR(2) + reserved(2)
+                        if (offset + 4 > len) break;
+                        valueLength = view.getUint32(offset, littleEndian);
+                        offset += 4;
+                    } else if (vr.match(/^[A-Z]{2}$/)) {
+                        offset += 2; // VR(2)
+                        if (offset + 2 > len) break;
+                        valueLength = view.getUint16(offset, littleEndian);
+                        offset += 2;
+                    } else {
+                        // Fallback: maybe implicit VR element in explicit file
+                        if (offset + 2 > len) break;
+                        valueLength = view.getUint32(offset - 2, littleEndian);
+                        // backtrack: we read 2 bytes for VR that weren't VR
+                        // re-read as 4-byte length from current-2
+                        offset += 2; // skip remaining length bytes
+                        vr = IMPLICIT_VR_MAP[tag] || '??';
+                    }
+                } else {
+                    // Implicit VR: length is 4 bytes
+                    if (offset + 4 > len) break;
+                    valueLength = view.getUint32(offset, littleEndian);
+                    offset += 4;
+                    vr = IMPLICIT_VR_MAP[tag] || '??';
+                }
+
+                // Handle undefined length sequences
+                if (valueLength === 0xFFFFFFFF) {
+                    if (tag === 0x7FE00010) {
+                        // Pixel data with undefined length — encapsulated
+                        // Try to find first fragment
+                        // Skip (FFFE,E000) item tag + length for offset table
+                        if (offset + 8 <= len) {
+                            const itemGroup = view.getUint16(offset, littleEndian);
+                            const itemElem = view.getUint16(offset + 2, littleEndian);
+                            if (itemGroup === 0xFFFE && itemElem === 0xE000) {
+                                const itemLen = view.getUint32(offset + 4, littleEndian);
+                                offset += 8 + itemLen; // skip offset table
+                                // Now read the first data fragment
+                                if (offset + 8 <= len) {
+                                    const fragGroup = view.getUint16(offset, littleEndian);
+                                    const fragElem = view.getUint16(offset + 2, littleEndian);
+                                    if (fragGroup === 0xFFFE && fragElem === 0xE000) {
+                                        const fragLen = view.getUint32(offset + 4, littleEndian);
+                                        offset += 8;
+                                        pixelDataOffset = offset;
+                                        pixelDataLength = fragLen;
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    // Skip unknown undefined-length sequences by scanning for delimiter
+                    let found = false;
+                    while (offset < len - 8) {
+                        const sg = view.getUint16(offset, littleEndian);
+                        const se = view.getUint16(offset + 2, littleEndian);
+                        if (sg === 0xFFFE && se === 0xE00D) { offset += 8; found = true; break; }
+                        if (sg === 0xFFFE && se === 0xE0DD) { offset += 8; found = true; break; }
+                        offset++;
+                    }
+                    if (!found) break;
+                    continue;
+                }
+
+                // Sanity check
+                if (valueLength > len - offset) break;
+
+                const valEnd = offset + valueLength;
+
+                switch(tag) {
+                    case 0x00280010: rows = view.getUint16(offset, littleEndian); break;
+                    case 0x00280011: cols = view.getUint16(offset, littleEndian); break;
+                    case 0x00280100: bitsAlloc = view.getUint16(offset, littleEndian); break;
+                    case 0x00280101: bitsStored = view.getUint16(offset, littleEndian); break;
+                    case 0x00280102: highBit = view.getUint16(offset, littleEndian); break;
+                    case 0x00280103: pixelRepresentation = view.getUint16(offset, littleEndian); break;
+                    case 0x00280002: samplesPerPixel = view.getUint16(offset, littleEndian); break;
+                    case 0x00281050: {
+                        const s = readString(view, offset, valueLength);
+                        windowCenter = parseFloat(s.split('\\')[0]);
+                        break;
+                    }
+                    case 0x00281051: {
+                        const s = readString(view, offset, valueLength);
+                        windowWidth = parseFloat(s.split('\\')[0]);
+                        break;
+                    }
+                    case 0x00281052: rescaleIntercept = parseFloat(readString(view, offset, valueLength)) || 0; break;
+                    case 0x00281053: rescaleSlope = parseFloat(readString(view, offset, valueLength)) || 1; break;
+                    case 0x00280004: photometricInterp = readString(view, offset, valueLength).trim(); break;
+                    case 0x7FE00010:
+                        pixelDataOffset = offset;
+                        pixelDataLength = valueLength;
+                        break;
+                }
+
+                if (pixelDataOffset >= 0 && tag === 0x7FE00010) break;
+                offset = valEnd;
+            }
+
+            if (pixelDataOffset < 0 || rows === 0 || cols === 0) {
+                throw new Error(`DICOM parse incomplete: rows=${rows}, cols=${cols}, pixelData=${pixelDataOffset >= 0}, transferSyntax=${transferSyntax}`);
+            }
+
+            // ---- Phase 3: Read pixel data & render ----
+            const numPixels = rows * cols * samplesPerPixel;
+            let pixelArray;
+
+            // Handle byte alignment for TypedArray (must be aligned to element size)
+            if (bitsAlloc === 16) {
+                const byteLen = Math.min(numPixels * 2, pixelDataLength);
+                if (pixelDataOffset % 2 !== 0) {
+                    // Unaligned — copy to aligned buffer
+                    const tmp = new Uint8Array(arrayBuffer, pixelDataOffset, byteLen);
+                    const aligned = new ArrayBuffer(byteLen);
+                    new Uint8Array(aligned).set(tmp);
+                    pixelArray = pixelRepresentation === 1
+                        ? new Int16Array(aligned, 0, numPixels)
+                        : new Uint16Array(aligned, 0, numPixels);
+                } else {
+                    pixelArray = pixelRepresentation === 1
+                        ? new Int16Array(arrayBuffer, pixelDataOffset, Math.min(numPixels, pixelDataLength / 2))
+                        : new Uint16Array(arrayBuffer, pixelDataOffset, Math.min(numPixels, pixelDataLength / 2));
+                }
+            } else {
+                pixelArray = new Uint8Array(arrayBuffer, pixelDataOffset, Math.min(numPixels, pixelDataLength));
+            }
+
+            // Rescale
+            let minVal = Infinity, maxVal = -Infinity;
+            const rescaled = new Float32Array(numPixels);
+            for (let i = 0; i < numPixels; i++) {
+                rescaled[i] = pixelArray[i] * rescaleSlope + rescaleIntercept;
+                if (rescaled[i] < minVal) minVal = rescaled[i];
+                if (rescaled[i] > maxVal) maxVal = rescaled[i];
+            }
+
+            // Window/level
+            let wc = windowCenter !== null ? windowCenter : (minVal + maxVal) / 2;
+            let ww = windowWidth !== null ? windowWidth : (maxVal - minVal);
+            if (ww === 0) ww = 1;
+            const lower = wc - ww / 2;
+            const upper = wc + ww / 2;
+
+            // Create canvas
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = cols;
+            tmpCanvas.height = rows;
+            const tmpCtx = tmpCanvas.getContext('2d');
+            const imgData = tmpCtx.createImageData(cols, rows);
+
+            const invert = photometricInterp === 'MONOCHROME1';
+            for (let i = 0; i < rows * cols; i++) {
+                let val = (rescaled[i] - lower) / (upper - lower);
+                val = Math.max(0, Math.min(1, val));
+                if (invert) val = 1 - val;
+                const byte = Math.round(val * 255);
+                imgData.data[i * 4] = byte;
+                imgData.data[i * 4 + 1] = byte;
+                imgData.data[i * 4 + 2] = byte;
+                imgData.data[i * 4 + 3] = 255;
+            }
+            tmpCtx.putImageData(imgData, 0, 0);
+
+            const img = new Image();
+            img.src = tmpCanvas.toDataURL('image/png');
+            img.width = cols;
+            img.height = rows;
+            img._dicomCanvas = tmpCanvas;
+            img._loaded = true;
+
+            return img;
+        }
+
+        function readString(view, offset, length) {
+            let s = '';
+            for (let i = 0; i < length; i++) {
+                if (offset + i >= view.byteLength) break;
+                const c = view.getUint8(offset + i);
+                if (c === 0) break;
+                s += String.fromCharCode(c);
+            }
+            return s;
+        }
+
+        // ==================== Zoom / Pan ====================
+        function handleWheel(e) {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const oldZoom = zoom;
+            const newZoom = e.deltaY < 0 ? Math.min(10, zoom * 1.15) : Math.max(0.05, zoom / 1.15);
+            panX = mx - (mx - panX) * (newZoom / oldZoom);
+            panY = my - (my - panY) * (newZoom / oldZoom);
+            zoom = newZoom;
+            document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%';
+            redraw();
+        }
+
+        function zoomIn() { zoom = Math.min(10, zoom * 1.3); document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%'; redraw(); }
+        function zoomOut() { zoom = Math.max(0.05, zoom / 1.3); document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%'; redraw(); }
+        function resetView() {
+            zoom = 1; panX = 0; panY = 0;
+            if (originalImage) {
+                // Fit image in canvas
+                const cw = canvas.width, ch = canvas.height;
+                const iw = originalImage.width, ih = originalImage.height;
+                zoom = Math.min(cw / iw, ch / ih) * 0.95;
+                panX = (cw - iw * zoom) / 2;
+                panY = (ch - ih * zoom) / 2;
+            }
+            document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%';
+            redraw();
+        }
+
+        // ==================== Drawing ====================
+        function redraw() {
+            if (!canvas) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#2c3e50';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (!originalImage) {
+                ctx.fillStyle = '#fff';
+                ctx.font = '18px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('請載入影像', canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            ctx.save();
+            ctx.translate(panX, panY);
+            ctx.scale(zoom, zoom);
+
+            // Draw image
+            if (originalImage._dicomCanvas) {
+                ctx.drawImage(originalImage._dicomCanvas, 0, 0);
+            } else {
+                ctx.drawImage(originalImage, 0, 0);
+            }
+
+            // Draw annotations
+            if (annotationData) {
+                const vertebrae = annotationData.vertebrae || [];
+                const showPoints = document.getElementById('chkPoints').checked;
+                const showLines = document.getElementById('chkLines').checked;
+                const showLabels = document.getElementById('chkLabels').checked;
+                const showDiscs = document.getElementById('chkDiscs').checked;
+
+                // Draw discs first (under vertebrae)
+                if (showDiscs && annotationData.discs) {
+                    annotationData.discs.forEach(disc => drawDisc(disc, vertebrae));
+                }
+
+                vertebrae.forEach((v, idx) => {
+                    const isHighlight = idx === highlightVertebra;
+                    drawVertebra(v, idx, showPoints, showLines, showLabels, isHighlight);
+                });
+            }
+
+            ctx.restore();
+        }
+
+        function drawVertebra(v, idx, showPoints, showLines, showLabels, isHighlight) {
+            const pts = v.points;
+            if (!pts) return;
+
+            const corners = []; // ordered for outline
+            const allPts = []; // all points including middle
+
+            // Collect corners in order (apply coordinate scaling)
+            for (const [name, config] of Object.entries(CORNER_CONFIG)) {
+                let p = null;
+                if (typeof pts === 'object' && !Array.isArray(pts)) {
+                    p = pts[name];
+                }
+                if (p && p.x != null && p.y != null) {
+                    const sp = { x: p.x * scaleX, y: p.y * scaleY, name, config };
+                    allPts.push(sp);
+                    if (config.idx < 4) corners.push(sp);
+                }
+            }
+
+            // Handle V2.0 list format: [AS, PS, PI, AI]
+            if (Array.isArray(pts)) {
+                const names = ['anteriorSuperior', 'posteriorSuperior', 'posteriorInferior', 'anteriorInferior'];
+                pts.forEach((p, i) => {
+                    if (p && p.x != null && i < names.length) {
+                        const name = names[i];
+                        const config = CORNER_CONFIG[name];
+                        const sp = { x: p.x * scaleX, y: p.y * scaleY, name, config };
+                        corners.push(sp);
+                        allPts.push(sp);
+                    }
+                });
+            }
+
+            if (allPts.length === 0) return;
+
+            const lineWidth = isHighlight ? 3 / zoom : 1.5 / zoom;
+            const ptRadius = isHighlight ? 6 / zoom : 4 / zoom;
+
+            // Outline
+            if (showLines && corners.length >= 2) {
+                // Sort corners by their index for proper quadrilateral drawing
+                const sorted = [...corners].sort((a, b) => a.config.idx - b.config.idx);
+                ctx.beginPath();
+                ctx.moveTo(sorted[0].x, sorted[0].y);
+                for (let i = 1; i < sorted.length; i++) ctx.lineTo(sorted[i].x, sorted[i].y);
+                ctx.closePath();
+                ctx.strokeStyle = isHighlight ? '#00ff00' : 'rgba(255,255,255,0.7)';
+                ctx.lineWidth = lineWidth;
+                ctx.stroke();
+
+                if (isHighlight) {
+                    ctx.fillStyle = 'rgba(0,255,0,0.1)';
+                    ctx.fill();
+                }
+            }
+
+            // Points
+            if (showPoints) {
+                allPts.forEach(p => {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, ptRadius, 0, Math.PI * 2);
+                    ctx.fillStyle = p.config.color;
+                    ctx.fill();
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 1 / zoom;
+                    ctx.stroke();
+                });
+            }
+
+            // Label
+            if (showLabels) {
+                const cx = allPts.reduce((s, p) => s + p.x, 0) / allPts.length;
+                const cy = allPts.reduce((s, p) => s + p.y, 0) / allPts.length;
+                const fontSize = Math.max(12, 16 / zoom);
+                ctx.font = `bold ${fontSize}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+
+                // Background
+                const metrics = ctx.measureText(v.name);
+                const pad = 3 / zoom;
+                ctx.fillStyle = isHighlight ? 'rgba(0,200,0,0.8)' : 'rgba(0,0,0,0.6)';
+                ctx.fillRect(cx - metrics.width/2 - pad, cy - fontSize/2 - pad,
+                             metrics.width + pad*2, fontSize + pad*2);
+
+                ctx.fillStyle = '#fff';
+                ctx.fillText(v.name, cx, cy);
+            }
+        }
+
+        function drawDisc(disc, vertebrae) {
+            // Find the two vertebrae for this disc
+            if (!disc.upperEndplate && !disc.level) return;
+
+            // Try to find by level name
+            const level = disc.level || '';
+            const parts = level.split('/');
+            if (parts.length !== 2) return;
+
+            const upperV = vertebrae.find(v => v.name === parts[0]);
+            const lowerV = vertebrae.find(v => v.name === parts[1]);
+            if (!upperV || !lowerV) return;
+
+            const uPts = upperV.points;
+            const lPts = lowerV.points;
+            if (!uPts || !lPts) return;
+
+            // Upper vertebra's lower endplate
+            const uAI = uPts.anteriorInferior || (Array.isArray(uPts) ? uPts[3] : null);
+            const uPI = uPts.posteriorInferior || (Array.isArray(uPts) ? uPts[2] : null);
+            // Lower vertebra's upper endplate
+            const lAS = lPts.anteriorSuperior || (Array.isArray(lPts) ? lPts[0] : null);
+            const lPS = lPts.posteriorSuperior || (Array.isArray(lPts) ? lPts[1] : null);
+
+            if (!uAI || !uPI || !lAS || !lPS) return;
+
+            ctx.beginPath();
+            ctx.moveTo(uAI.x * scaleX, uAI.y * scaleY);
+            ctx.lineTo(uPI.x * scaleX, uPI.y * scaleY);
+            ctx.lineTo(lPS.x * scaleX, lPS.y * scaleY);
+            ctx.lineTo(lAS.x * scaleX, lAS.y * scaleY);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(52,152,219,0.15)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(52,152,219,0.4)';
+            ctx.lineWidth = 1 / zoom;
+            ctx.stroke();
+        }
+
+        // ==================== Sidebar ====================
+        function updateStatus() {
+            const parts = [];
+            if (originalImage) parts.push(`影像: ${originalImage.width}x${originalImage.height}`);
+            if (annotationData) {
+                const v = annotationData.version || '?';
+                const n = (annotationData.vertebrae || []).length;
+                parts.push(`JSON v${v}: ${n} 椎體`);
+            }
+            document.getElementById('statusText').textContent = parts.join(' | ') || '載入影像和 JSON 來驗證';
+        }
+
+        function renderSidebar() {
+            if (!annotationData) return;
+
+            // File info
+            const d = annotationData;
+            let infoHtml = '';
+            infoHtml += `<div class="info-card"><span class="label">檔案:</span> <span class="value">${d._fileName || '-'}</span></div>`;
+            infoHtml += `<div class="info-card"><span class="label">版本:</span> <span class="value">${d.version || '?'}</span></div>`;
+            infoHtml += `<div class="info-card"><span class="label">脊椎類型:</span> <span class="value">${d.spineType === 'L' ? 'L-Spine 腰椎' : d.spineType === 'C' ? 'C-Spine 頸椎' : d.spineType || '?'}</span></div>`;
+            if (d.imageInfo) {
+                infoHtml += `<div class="info-card"><span class="label">標註影像尺寸:</span> <span class="value">${d.imageInfo.width} x ${d.imageInfo.height}</span></div>`;
+            }
+            if (d.exportDate) {
+                infoHtml += `<div class="info-card"><span class="label">匯出日期:</span> <span class="value">${new Date(d.exportDate).toLocaleString()}</span></div>`;
+            }
+            // Check size match
+            if (originalImage && d.imageInfo) {
+                const match = originalImage.width === d.imageInfo.width && originalImage.height === d.imageInfo.height;
+                infoHtml += `<div class="info-card" style="border-left:4px solid ${match ? '#27ae60' : '#dc3545'};">
+                    <span class="label">尺寸比對:</span>
+                    <span class="value" style="color:${match ? '#27ae60' : '#dc3545'};">
+                        ${match ? '✅ 一致' : `⚠️ 不一致 (影像 ${originalImage.width}x${originalImage.height})`}
+                    </span>
+                </div>`;
+            }
+            document.getElementById('fileInfo').innerHTML = infoHtml;
+
+            // Vertebrae
+            const vertebrae = d.vertebrae || [];
+            let vHtml = '';
+            vertebrae.forEach((v, idx) => {
+                const bt = v.boundaryType;
+                const isAW = v.anteriorWedgingFracture;
+                const isCrush = v.crushDeformityFracture;
+                const ptCount = typeof v.points === 'object' && !Array.isArray(v.points)
+                    ? Object.keys(v.points).length
+                    : (Array.isArray(v.points) ? v.points.length : 0);
+
+                let badgeClass = 'badge-ok', badgeText = `${ptCount} 點`;
+                if (bt) { badgeClass = 'badge-boundary'; badgeText = bt === 'upper' ? '上終板' : '下終板'; }
+                if (isAW) { badgeClass = 'badge-fracture'; badgeText = 'AW Fracture'; }
+                if (isCrush) { badgeClass = 'badge-fracture'; badgeText = 'Crush'; }
+
+                let detail = '';
+                if (v.anteriorHeight != null && v.posteriorHeight != null) {
+                    const ratio = v.anteriorHeight / v.posteriorHeight;
+                    detail = `A=${v.anteriorHeight.toFixed(0)} / P=${v.posteriorHeight.toFixed(0)} (${(ratio*100).toFixed(0)}%)`;
+                }
+
+                vHtml += `<div class="vertebra-card ${idx === highlightVertebra ? 'active' : ''}"
+                               onmouseenter="highlightVertebra=${idx};redraw();this.classList.add('active');"
+                               onmouseleave="highlightVertebra=-1;redraw();this.classList.remove('active');">
+                    <div style="flex:1;">
+                        <div class="name">${v.name} <span class="badge ${badgeClass}">${badgeText}</span></div>
+                        ${detail ? `<div class="detail">${detail}</div>` : ''}
+                    </div>
+                </div>`;
+            });
+            document.getElementById('vertebraList').innerHTML = vHtml || '<div class="empty-state">無椎體資料</div>';
+
+            // Discs
+            const discs = d.discs || [];
+            let dHtml = '';
+            discs.forEach(disc => {
+                const ah = disc.anteriorHeight?.toFixed(0) || '-';
+                const ph = disc.posteriorHeight?.toFixed(0) || '-';
+                const mh = disc.middleHeight?.toFixed(0) || '';
+                const wa = disc.wedgeAngle?.toFixed(1) || disc.angle?.toFixed(1) || '';
+                dHtml += `<div class="disc-item">
+                    <span style="font-weight:bold;">${disc.level}</span>
+                    <span>${ah !== '-' || ph !== '-' ? `A:${ah} P:${ph}` : ''} ${mh ? 'M:'+mh : ''} ${wa ? wa+'°' : ''}</span>
+                </div>`;
+            });
+            document.getElementById('discList').innerHTML = dHtml || '<div class="empty-state">無椎間盤資料</div>';
+
+            // Alerts
+            const abnormalities = d.abnormalities || {};
+            let aHtml = '';
+            const fractures = abnormalities.compressionFractures || abnormalities.compression_fractures || [];
+            fractures.forEach(f => {
+                const name = f.name || f.vertebra || '?';
+                const type = f.type || 'compression';
+                aHtml += `<div class="info-card" style="border-left:4px solid #dc3545;">
+                    <span class="value" style="color:#dc3545;">${name} — ${type}</span>
+                </div>`;
+            });
+
+            // Check vertebrae for inline fracture flags
+            (d.vertebrae || []).forEach(v => {
+                if (v.anteriorWedgingFracture) {
+                    aHtml += `<div class="info-card" style="border-left:4px solid #dc3545;">
+                        <span class="value" style="color:#dc3545;">${v.name} — Anterior Wedging</span>
+                    </div>`;
+                }
+                if (v.crushDeformityFracture) {
+                    aHtml += `<div class="info-card" style="border-left:4px solid #dc3545;">
+                        <span class="value" style="color:#dc3545;">${v.name} — Crush Deformity</span>
+                    </div>`;
+                }
+            });
+
+            document.getElementById('alertList').innerHTML = aHtml || '<div class="info-card" style="border-left:4px solid #27ae60;"><span class="value" style="color:#27ae60;">✅ 無異常</span></div>';
+        }
+    </script>
+</body>
+</html>
