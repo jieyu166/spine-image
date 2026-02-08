@@ -701,8 +701,10 @@
             const newZoom = Math.max(0.1, Math.min(5, zoom * delta));
 
             const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
+            const cssToCanvasX = canvas.width / rect.width;
+            const cssToCanvasY = canvas.height / rect.height;
+            const mouseX = (e.clientX - rect.left) * cssToCanvasX;
+            const mouseY = (e.clientY - rect.top) * cssToCanvasY;
 
             panX = mouseX - (mouseX - panX) * (newZoom / zoom);
             panY = mouseY - (mouseY - panY) * (newZoom / zoom);
@@ -722,8 +724,11 @@
 
         function handleMouseMove(e) {
             if (isDragging) {
-                panX += e.clientX - lastMousePos.x;
-                panY += e.clientY - lastMousePos.y;
+                const rect = canvas.getBoundingClientRect();
+                const cssToCanvasX = canvas.width / rect.width;
+                const cssToCanvasY = canvas.height / rect.height;
+                panX += (e.clientX - lastMousePos.x) * cssToCanvasX;
+                panY += (e.clientY - lastMousePos.y) * cssToCanvasY;
                 lastMousePos = {x: e.clientX, y: e.clientY};
                 wasDragging = true;
                 redraw();
