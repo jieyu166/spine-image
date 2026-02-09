@@ -1,6 +1,6 @@
-# 技術參考文件 (Technical Reference)
+# 技術參考文件 V3 (Technical Reference)
 
-本文件整合了：技術細節、已解決問題、標註規範、3D Slicer 使用指南。
+本文件整合了：V3 模型技術細節、已解決問題、標註規範、API 參考。
 
 ---
 
@@ -8,8 +8,7 @@
 1. [系統架構](#系統架構)
 2. [已解決的技術問題](#已解決的技術問題)
 3. [標註規範](#標註規範)
-4. [3D Slicer 使用指南](#3d-slicer-使用指南)
-5. [API 參考](#api-參考)
+4. [API 參考](#api-參考)
 
 ---
 
@@ -17,342 +16,264 @@
 
 ### 數據流程
 ```
-DICOM檔案
-  → pydicom載入
-  → NumPy陣列
-  → 創建遮罩（原始尺寸）
-  → 分離Transform
-     - 遮罩：Resize(512,512)
-     - 圖像：Resize+Augmentation+ToTensorV2
-  → custom_collate_fn
-  → 模型訓練
+影像 (DICOM/PNG/JPG)
+  → pydicom 或 OpenCV 載入
+  → NumPy 陣列 (RGB)
+  → Albumentations 增強 + Resize(512,512)
+  → ToTensorV2 + Normalize
+  → 訓練: VertebraCornerModel (V3)
+  → 推理: VertebraInference
 ```
 
-### 模型架構詳細
+### V3 模型架構詳細
 ```
 輸入層: [B, 3, 512, 512]
 
 Encoder (ResNet50 預訓練):
-├── Encoder1: [B, 64, 256, 256]
-├── Encoder2: [B, 256, 128, 128]
-├── Encoder3: [B, 512, 64, 64]
-├── Encoder4: [B, 1024, 32, 32]
-└── Encoder5: [B, 2048, 16, 16]
+├── layer0 (conv1+bn+relu+maxpool): [B, 64, 128, 128]    ← skip1
+├── layer1:                          [B, 256, 64, 64]     ← skip2
+├── layer2:                          [B, 512, 32, 32]     ← skip3
+├── layer3:                          [B, 1024, 16, 16]    ← skip4
+└── layer4:                          [B, 2048, 8, 8]      ← bottleneck
 
-Decoder (U-Net style):
-├── Decoder1 + Skip4: [B, 1024, 32, 32]
-├── Decoder2 + Skip3: [B, 512, 64, 64]
-├── Decoder3 + Skip2: [B, 256, 128, 128]
-└── Decoder4 + Skip1: [B, 128, 256, 256]
+UNet Decoder (skip connections):
+├── up4: Upsample + [2048+1024, 512] → [B, 512, 16, 16]
+├── up3: Upsample + [512+512, 256]   → [B, 256, 32, 32]
+└── up2: Upsample + [256+256, 128]   → [B, 128, 64, 64]
 
-輸出頭:
-├── endplate_seg: [B, 1, 256, 256]
-├── vertebra_edge_seg: [B, 2, 256, 256]
-└── keypoint_heatmap: [B, 1, 256, 256]
+Heatmap Head:
+  Conv2d(128, 64, 3) → BN → ReLU
+  → Upsample(scale=2)        → [B, 64, 128, 128]
+  → Conv2d(64, 32, 1)        → [B, 32, 128, 128]
+
+Count Head:
+  AdaptiveAvgPool2d(1) → Flatten
+  → Linear(2048, 256) → ReLU
+  → Linear(256, 9)           → [B, 9] (0~8 vertebrae)
 ```
 
 ### 損失函數
 ```python
-L_total = α * L_endplate + β * L_edge + γ * L_keypoint
+# V3 損失
+L_total = Focal_Loss(heatmaps) + 0.5 * CrossEntropy(count)
 
-# 其中:
-L_endplate = BCE_Loss(pred_endplate, target_endplate)
-L_edge = BCE_Loss(pred_edge, target_edge)
-L_keypoint = MSE_Loss(pred_heatmap, target_heatmap)
+# Focal Loss 參數
+alpha = 2.0   # 正樣本聚焦因子
+beta = 4.0    # 負樣本衰減因子
+threshold = 0.01  # 正負樣本分界
 
-# 權重:
-α = 1.0, β = 1.0, γ = 0.5
+# 正樣本: -(1-pred)^alpha * log(pred) * target^beta
+# 負樣本: -(pred)^alpha * log(1-pred) * (1-target)^beta
 ```
+
+### V2 vs V3 模型對照
+
+| 模型 | 訓練腳本 | 推理腳本 | 模型檔案 | Checkpoint 特徵 |
+|------|----------|----------|----------|----------------|
+| V1 (終板) | train_endplate_model.py | inference.py | best_endplate_model.pth | endplate_seg |
+| V2 (椎體回歸) | - | inference_vertebra.py | best_vertebra_model.pth | backbone.* keys |
+| V3 (heatmap) | train_vertebra_model.py | inference_vertebra.py | best_vertebra_model.pth | layer0.* keys |
+
+**自動偵測**: `inference_vertebra.py` 會檢查 checkpoint 的 key prefix，自動切換 V2/V3 解碼方式。
 
 ---
 
 ## 已解決的技術問題
 
-### 問題 1: 路徑配置錯誤
-**錯誤**: `找到0個有效標註檔案`
-**修正**: `prepare_endplate_data.py` 第291行改為 `data_dir='.'`
+### 問題 1: V2 模型推理結果集中 (核心問題)
+**現象**: 所有角點聚集在影像中央一小區域
+**原因**: `AdaptiveAvgPool2d(1)` 將空間資訊壓縮為 1x1，回歸分支無法學習空間位置
+**修正**: V3 改用多通道 heatmap + UNet decoder with skip connections
 
-### 問題 2: DICOM 路徑丟失
-**錯誤**: `FileNotFoundError: Cannot load image`
-**修正**: 自動搜尋對應 DICOM 檔案
-```python
-dcm_path = json_path.with_suffix('.dcm')
-if dcm_path.exists():
-    image_path = str(dcm_path.relative_to(self.input_dir))
-```
+### 問題 2: V2 checkpoint 不相容 V3 模型
+**錯誤**: `RuntimeError: Error(s) in loading state_dict: Missing key(s)`
+**修正**: `inference_vertebra.py` 中加入 `_load_v2_model()` 向下相容
 
-### 問題 3: OpenCV 無法讀取 DICOM
-**錯誤**: `cv::findDecoder imread: can't open`
-**修正**: 使用 pydicom 載入
-```python
-if image_path.endswith('.dcm'):
-    dcm = pydicom.dcmread(image_path)
-    image = dcm.pixel_array
-    image = ((image - image.min()) / (image.max() - image.min()) * 255).astype(np.uint8)
-```
+### 問題 3: 2_train_model.bat 調用錯誤腳本
+**錯誤**: 訓練完成後 checkpoint 仍為 V2 (backbone.* keys)
+**原因**: bat 檔案仍呼叫 `train_endplate_model.py`
+**修正**: 改為呼叫 `train_vertebra_model.py`
 
-### 問題 4: NumPy 記憶體佈局
-**錯誤**: `cv2.error: Layout of the output array img is incompatible`
-**修正**: 使用獨立遮罩
-```python
-anterior_mask = np.zeros((h, w), dtype=np.float32)
-posterior_mask = np.zeros((h, w), dtype=np.float32)
-cv2.line(anterior_mask, ...)
-cv2.line(posterior_mask, ...)
-vertebra_edge_mask[:,:,0] = anterior_mask
-vertebra_edge_mask[:,:,1] = posterior_mask
-```
+### 問題 4: quick_test.py 僅支援 V1 格式
+**修正**: 新增 V2 格式偵測 (`vertebrae` field)
 
 ### 問題 5: Windows 多進程
 **錯誤**: DataLoader worker error
 **修正**: `num_workers=0`
 
-### 問題 6: 遮罩尺寸不一致
-**錯誤**: `stack expects each tensor to be equal size`
-**修正**: 統一 resize 到 512x512，分離 transform
-
-### 問題 7: ToTensorV2 類型衝突
-**錯誤**: `expected np.ndarray (got Tensor)`
-**修正**: 遮罩和圖像使用分離的 transform
-
-### 問題 8: 關鍵點數量不同
-**錯誤**: `stack expects equal size (keypoints)`
-**修正**: 使用 custom_collate_fn，keypoints 保持為 list
-
-### 問題 9: 損失函數尺寸不匹配
-**錯誤**: `target size different to input size`
-**修正**: 使用 F.interpolate 調整目標遮罩尺寸
-```python
-endplate_mask_resized = F.interpolate(
-    targets['endplate_mask'],
-    size=(pred_h, pred_w),
-    mode='bilinear'
-)
-```
+### 問題 6: OpenCV 無法讀取 DICOM
+**修正**: 使用 pydicom 載入 `.dcm` 檔案
 
 ---
 
 ## 標註規範
 
-### JSON 資料結構
+### JSON 標註格式 V2
+
 ```json
 {
-  "patient_id": "P001",
-  "study_id": "S20240115001",
-  "spine_type": "L",
-  "image_type": "flexion",
-  "image_dimensions": {
-    "width": 1936,
-    "height": 3408
-  },
-  "measurements": [
+  "version": "2.0",
+  "spineType": "L",
+  "vertebrae": [
     {
-      "level": "L4/L5",
-      "angle": 15.3,
-      "angle_raw": 164.7,
-      "confidence": 0.95,
-      "lowerEndplate": [
-        {"x": 959.7, "y": 2016.9},
-        {"x": 657.5, "y": 2037.4}
-      ],
-      "upperEndplate": [
-        {"x": 963.8, "y": 1974.1},
-        {"x": 673.8, "y": 1959.8}
-      ]
+      "name": "S1",
+      "points": {
+        "anteriorSuperior": {"x": 100, "y": 400},
+        "posteriorSuperior": {"x": 300, "y": 410}
+      },
+      "isBoundary": true
+    },
+    {
+      "name": "L5",
+      "points": {
+        "anteriorSuperior": {"x": 100, "y": 200},
+        "posteriorSuperior": {"x": 300, "y": 210},
+        "posteriorInferior": {"x": 310, "y": 350},
+        "anteriorInferior": {"x": 110, "y": 340}
+      }
     }
-  ],
-  "vertebra_edges": {
-    "L5": {
-      "anterior": [
-        {"x": 657.5, "y": 2037.4},
-        {"x": 633.0, "y": 2243.6}
-      ],
-      "posterior": [
-        {"x": 959.7, "y": 2016.9},
-        {"x": 947.5, "y": 2223.2}
-      ]
-    }
-  }
+  ]
 }
 ```
 
-### 標註標準
+### 邊界椎體規則
+| 脊椎類型 | 上邊界 (2點) | 下邊界 (2點) |
+|----------|-------------|-------------|
+| L-spine | S1 (只有上緣) | T12 (只有下緣) |
+| C-spine | T1 (只有上緣) | C2 (只有下緣) |
 
-**終板標記**:
-- 每個終板需要 2 個端點
-- x 座標較小 → 前緣 (anterior)
-- x 座標較大 → 後緣 (posterior)
-
-**信心度評分**:
-| 分數 | 說明 |
-|------|------|
-| 0.9-1.0 | 終板邊界非常清晰 |
-| 0.8-0.9 | 終板邊界清晰 |
-| 0.7-0.8 | 終板邊界較清晰 |
-| 0.6-0.7 | 終板邊界模糊 |
-| <0.6 | 測量不可靠 |
-
-**角度計算**:
-```
-角度 = |atan2(y2-y1, x2-x1) - atan2(y4-y3, x4-x3)| * 180/π
-```
-- 正常範圍: 5-25度
-- 異常範圍: >25度 或 <5度
-
----
-
-## 3D Slicer 使用指南
-
-### 載入腳本
-```python
-# 在 3D Slicer Python Console 執行
-exec(open('slicer_export_spine_annotations.py').read())
-```
-
-### 建立範本線
-```python
-# 腰椎範本
-create_spine_template_lines()
-
-# 頸椎範本
-create_cervical_template_lines()
-```
-
-### 標註流程
-1. 載入脊椎 X 光片到 3D Slicer
-2. 執行腳本載入函數
-3. 選擇對應的範本線
-4. 調整線條位置到終板邊界
-5. 設定信心度和註記
-
-### 匯出標註
-```python
-export_spine_annotations()
-```
-
-### 角度銳角化規則
-```python
-def _normalize_angle_to_acute(diff_deg):
-    diff = abs(diff_deg) % 180.0
-    if diff > 90.0:
-        diff = 180.0 - diff
-    return diff
-```
+### 角點名稱 (固定順序)
+1. `anteriorSuperior` - 前上角
+2. `posteriorSuperior` - 後上角
+3. `posteriorInferior` - 後下角
+4. `anteriorInferior` - 前下角
 
 ---
 
 ## API 參考
 
-### inference.py 參數
+### inference_vertebra.py 參數
 
 | 參數 | 說明 | 預設值 |
 |------|------|--------|
-| `--model` | 模型檔案路徑 | best_endplate_model.pth |
+| `--model` | 模型 checkpoint 路徑 | best_vertebra_model.pth |
 | `--input` | 輸入影像或資料夾 | 必填 |
 | `--output` | 輸出結果資料夾 | inference_results |
+| `--spine-type` | 脊椎類型 L 或 C | L |
 | `--device` | 計算設備 | auto |
+| `--threshold` | Heatmap peak 信心度門檻 | 0.2 |
 | `--no-viz` | 不生成視覺化 | False |
 
-### API 端點
+### API 伺服器 (api_server_vertebra.py)
 
-**POST /api/analyze**
 ```bash
-curl -X POST "http://localhost:8000/api/analyze" \
-  -F "file=@spine.dcm" \
-  -F "threshold=0.5" \
-  -F "return_image=true"
+python api_server_vertebra.py
+# http://localhost:8001
+# API docs: http://localhost:8001/docs
+```
+
+**POST /api/predict**
+```bash
+curl -X POST "http://localhost:8001/api/predict" \
+  -F "file=@spine.png" \
+  -F "spine_type=L"
 ```
 
 **回應格式**:
 ```json
 {
-  "image_file": "spine.dcm",
-  "num_endplates": 12,
-  "num_angles": 11,
-  "endplate_lines": [...],
-  "angles": [...],
-  "result_image": "base64..."
+  "success": true,
+  "spine_type": "L",
+  "predicted_count": 7,
+  "count_confidence": 0.85,
+  "vertebrae": [
+    {
+      "name": "S1",
+      "boundaryType": "upper",
+      "points": {"anteriorSuperior": {"x": 100, "y": 400}, ...},
+      "confidences": {"anteriorSuperior": 0.92, ...}
+    }
+  ],
+  "discs": [...],
+  "result_image": "data:image/png;base64,...",
+  "heatmap_image": "data:image/png;base64,..."
 }
 ```
 
-### SpineAnalyzer 類別
+### VertebraInference 類別
 
 ```python
-from inference import SpineAnalyzer
+from inference_vertebra import VertebraInference
 
-# 初始化
-analyzer = SpineAnalyzer(model_path, device='cuda')
+# 初始化 (自動偵測 V2/V3 checkpoint)
+analyzer = VertebraInference('best_vertebra_model.pth', device='cuda')
 
-# 分析影像
-results = analyzer.analyze(
-    image_path,
-    output_dir='results/',
-    visualize=True
-)
+# 預測
+result = analyzer.predict('spine.png', spine_type='L')
 
-# 提取終板線段（自訂閾值）
-endplate_lines = analyzer.extract_endplates(
-    mask,
-    threshold=0.3,
-    min_length=50
-)
+# 完整分析 (含儲存)
+result = analyzer.analyze('spine.png', spine_type='L',
+                          output_dir='results/', visualize=True)
+
+# 結果結構
+result['vertebrae']        # 椎體列表
+result['discs']            # 椎間盤列表
+result['heatmap']          # 合併 heatmap (2D numpy)
+result['channel_heatmaps'] # 各通道 heatmap (V3 only)
+result['original_image']   # 原始影像 (RGB numpy)
 ```
 
 ---
 
 ## 配置參數
 
-### 訓練配置 (train_endplate_model.py)
+### 訓練配置 (train_vertebra_model.py)
 ```python
 config = {
     'data_dir': '.',
-    'batch_size': 4,        # GPU 記憶體不足時改為 1
-    'epochs': 100,
-    'learning_rate': 1e-4,
+    'batch_size': 4,          # GPU 記憶體不足時改為 1-2
+    'epochs': 150,
+    'learning_rate': 3e-4,
     'weight_decay': 1e-4,
-    'num_workers': 0        # Windows 必須為 0
+    'num_workers': 0,         # Windows 必須為 0
+    'heatmap_size': 128,      # heatmap 解析度
+    'max_vertebrae': 8,       # 最多椎體數
 }
 ```
 
 ### 數據增強配置
 ```python
+# V3 增強策略 (train_vertebra_model.py)
 A.Compose([
     A.Resize(512, 512),
     A.HorizontalFlip(p=0.3),
-    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=10, p=0.3),
-    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.3),
+    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=8, p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.4),
+    A.CLAHE(clip_limit=2.0, p=0.3),
+    A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+    A.GaussianBlur(blur_limit=3, p=0.2),
+    A.Normalize(...),
     ToTensorV2()
 ])
 ```
 
 ---
 
-## 性能指標
-
-### 預期訓練結果
-| Epochs | Loss | IoU | 關鍵點誤差 |
-|--------|------|-----|-----------|
-| 1 | ~2.5 | ~0.05 | >100px |
-| 50 | ~1.0 | ~0.65 | ~30px |
-| 100 | ~0.5 | ~0.80 | <20px |
-
-### 推理性能
-| 設備 | 單張影像 | 批次處理 |
-|------|---------|---------|
-| GPU | ~0.1-0.2秒 | ~0.05秒/張 |
-| CPU | ~1-2秒 | ~0.5秒/張 |
-
----
-
 ## 版本歷史
 
-### v2.0 (2025-10-10)
-- ✅ 完整 ML 訓練流程
-- ✅ 推理和 API 支援
-- ✅ 9 個主要問題已解決
-- ✅ 完整文檔系統
+### v3.0 (2026-02)
+- Multi-channel heatmap (32 channels)
+- UNet decoder with skip connections
+- Focal Loss
+- Sub-pixel Taylor expansion refinement
+- V2 checkpoint backward compatibility
+- Enhanced augmentation (CLAHE, GaussianBlur, etc.)
+
+### v2.0 (2025-10)
+- Vertebra 4-corner annotation
+- Regression branch (AdaptiveAvgPool2d)
+- API server
 
 ### v1.0 (初版)
-- 基礎網頁工具
-- 手動標註功能
-- OpenAI API 整合
+- Endplate annotation
+- U-Net segmentation

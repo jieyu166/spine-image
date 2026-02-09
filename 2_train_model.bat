@@ -1,6 +1,7 @@
 @echo off
+chcp 65001 >nul
 echo ========================================
-echo 訓練終板檢測模型
+echo 訓練椎體頂點檢測模型 V3
 echo ========================================
 echo.
 
@@ -11,7 +12,14 @@ echo 當前目錄: %CD%
 echo.
 
 echo 開始訓練...
-python train_endplate_model.py
+python train_vertebra_model.py
+
+if errorlevel 1 (
+    echo.
+    echo 訓練失敗
+    pause
+    exit /b 1
+)
 
 echo.
 echo ========================================
