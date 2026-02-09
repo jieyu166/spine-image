@@ -1,4 +1,4 @@
-# 脊椎椎體檢測專案 V2 (Spine Vertebra Detection)
+# 脊椎椎體檢測專案 V3 (Spine Vertebra Detection)
 
 ## 專案概述
 
@@ -9,17 +9,28 @@
 - 檢測椎體滑脫（spondylolisthesis / retrolisthesis）
 - 驗證椎間盤高度遞進規律
 
-**狀態**: ✅ V2.0 Ready
-**最後更新**: 2025-01
+**狀態**: V3.0 Active Development
+**最後更新**: 2026-02
 
 ---
 
-## 🆕 V2.0 新特性
+## V3.0 新特性
 
-### 簡化標註方式
-- **舊方式**: 標註每個椎間盤的終板（每層 4 點）
-- **新方式**: 標註每個椎體的 4 個角點，系統自動推算椎間盤資訊
+### 模型架構升級 (V2 → V3)
+- **V2 (舊)**: ResNet50 + AdaptiveAvgPool2d(1) 回歸分支 → 座標精度差
+- **V3 (新)**: ResNet50 + UNet Decoder + 多通道 Heatmap → 空間精度大幅提升
 
+### V3 核心改進
+| 項目 | V2 | V3 |
+|------|-----|-----|
+| 座標提取 | 回歸分支 (FC層) | 多通道 heatmap peak |
+| 空間解析度 | 1x1 (全域池化) | 128x128 heatmap |
+| 損失函數 | BCE + MSE | Focal Loss + CE |
+| Decoder | 無跳躍連接 | UNet-style skip connections |
+| Sub-pixel | 無 | Taylor expansion refinement |
+
+### 標註方式
+標註每個椎體的 4 個角點，系統自動推算椎間盤資訊：
 ```
 椎體 4 個頂點：
     前上角 ●─────────────● 後上角     ← 上終板
@@ -34,11 +45,10 @@
 ### 自動計算指標
 | 指標 | 計算方式 |
 |------|----------|
-| **壓迫性骨折** | 前緣高度 < 後緣高度 × 0.75 |
+| **壓迫性骨折** | 前緣高度 < 後緣高度 x 0.75 |
 | **椎間盤高度** | 上椎體下終板 vs 下椎體上終板的距離 |
 | **Wedge Angle** | 椎間盤上下終板夾角 |
 | **Spondylolisthesis** | 後緣連線偏移 > 5% |
-| **高度遞進** | L-spine: L4/5最高; C-spine: 向下遞增 |
 
 ---
 
@@ -51,7 +61,7 @@ pip install -r requirements.txt
 
 ### 工作流程
 
-#### 1️⃣ 標註數據
+#### 1. 標註數據
 打開 `spinal-annotation-web.html`：
 1. 選擇脊椎類型（L-spine 或 C-spine）
 2. 載入或貼上 X 光影像
@@ -62,19 +72,25 @@ pip install -r requirements.txt
 - L-spine: 由下到上（S1 → L5 → L4 → ...）
 - C-spine: 由上到下（C2 → C3 → C4 → ...）
 
-#### 2️⃣ 準備訓練數據
+#### 2. 準備訓練數據
 ```bash
 python prepare_endplate_data.py
 ```
 
-#### 3️⃣ 訓練模型
+#### 3. 訓練模型
 ```bash
 python train_vertebra_model.py
 ```
 
-#### 4️⃣ 推理預測
+#### 4. 推理預測
 ```bash
-python inference.py --model best_vertebra_model.pth --input spine.dcm
+python inference_vertebra.py --model best_vertebra_model.pth --input spine.png --spine-type L
+```
+
+#### 5. API 伺服器
+```bash
+python api_server_vertebra.py
+# 瀏覽器開啟 http://localhost:8001
 ```
 
 ---
@@ -84,51 +100,74 @@ python inference.py --model best_vertebra_model.pth --input spine.dcm
 ```
 Spine/
 ├── 核心腳本
-│   ├── train_vertebra_model.py     # V2 訓練腳本 (椎體頂點)
-│   ├── train_endplate_model.py     # V1 訓練腳本 (終板)
-│   ├── prepare_endplate_data.py    # 數據準備 (支援 V1/V2)
-│   ├── inference.py                # 推理預測
-│   └── api_server.py               # FastAPI 服務
+│   ├── train_vertebra_model.py      # V3 訓練腳本 (多通道 heatmap)
+│   ├── inference_vertebra.py        # V3 推理腳本 (heatmap peak 提取)
+│   ├── api_server_vertebra.py       # V3 FastAPI 服務 (port 8001)
+│   ├── prepare_endplate_data.py     # 數據準備 (支援 V1/V2 標註格式)
+│   └── quick_test.py               # JSON 標註驗證
 │
 ├── 標註工具
-│   └── spinal-annotation-web.html  # V2 標註工具 (椎體4頂點)
+│   └── spinal-annotation-web.html   # V2 標註工具 (椎體4頂點)
+│
+├── 測試腳本
+│   ├── test_model_quick_start.py    # 模型架構快速測試
+│   ├── test_single_batch.py         # 數據載入與 heatmap 測試
+│   └── test_inference_debug.py      # 推理除錯測試
+│
+├── 批次檔
+│   ├── 0_quick_test.bat             # 驗證 JSON
+│   ├── 1_prepare_data.bat           # 準備數據
+│   ├── 2_train_model.bat            # 訓練模型
+│   ├── 3_inference.bat              # 推理預測
+│   └── RUN_ALL.bat                  # 完整流程
+│
+├── 已棄用 (V1 Legacy)
+│   ├── train_endplate_model.py      # [V1] 終板檢測訓練
+│   ├── inference.py                 # [V1] 終板檢測推理
+│   └── api_server.py               # [V1] 終板 API (port 8000)
 │
 ├── 文件
-│   ├── README.md                   # 本文件
-│   ├── USAGE_GUIDE.md              # 詳細使用指南
-│   └── TECHNICAL_REFERENCE.md      # 技術參考
+│   ├── README.md                    # 本文件
+│   ├── USAGE_GUIDE.md               # 詳細使用指南
+│   └── TECHNICAL_REFERENCE.md       # 技術參考
 │
 └── 資料夾
-    ├── endplate_training_data/     # 訓練數據
-    └── inference_results/          # 推理結果
+    ├── Images/                      # 訓練影像和標註
+    ├── endplate_training_data/      # 訓練數據
+    └── inference_results/           # 推理結果
 ```
 
 ---
 
-## 模型架構 V2
+## 模型架構 V3
 
 ```
 輸入: [B, 3, 512, 512]
   ↓
-ResNet50 Backbone (預訓練)
+ResNet50 Backbone (預訓練):
+├── layer0: [B, 64, 128, 128]   ← skip connection
+├── layer1: [B, 256, 64, 64]    ← skip connection
+├── layer2: [B, 512, 32, 32]    ← skip connection
+├── layer3: [B, 1024, 16, 16]   ← skip connection
+└── layer4: [B, 2048, 8, 8]
   ↓
-雙分支架構:
-├── 熱圖分支: 粗定位角點 → [B, 1, 256, 256]
-└── 回歸分支: 精確座標 → [B, N×4, 2]
+UNet Decoder (skip connections):
+├── up4: [B, 512, 16, 16]   (+ layer3)
+├── up3: [B, 256, 32, 32]   (+ layer2)
+└── up2: [B, 128, 64, 64]   (+ layer1)
   ↓
 輸出:
-├── heatmap: 角點熱圖
-├── coords: 角點座標 (正規化 0-1)
-└── count: 椎體數量
+├── heatmaps: [B, 32, 128, 128]  (8椎體 x 4角點 = 32通道)
+└── count_logits: [B, 9]          (0~8椎體計數)
 ```
 
 ### 損失函數
 ```
-L_total = α·L_heatmap + β·L_coord + γ·L_count
-- L_heatmap: BCE Loss (熱圖)
-- L_coord: MSE Loss (座標回歸)
-- L_count: Cross Entropy Loss (椎體計數)
-- α=1.0, β=2.0, γ=0.5
+L_total = Focal_Loss(heatmaps) + 0.5 * CrossEntropy(count)
+
+Focal Loss: (1-p)^alpha * -log(p)  (alpha=2.0, beta=4.0)
+- 專門處理正負樣本不平衡
+- 背景佔 heatmap 99%+ 的像素
 ```
 
 ---
@@ -153,42 +192,10 @@ L_total = α·L_heatmap + β·L_coord + γ·L_count
       "anteriorWedgingFracture": false
     }
   ],
-  "discs": [
-    {
-      "level": "L4/L5",
-      "metrics": {
-        "anteriorHeight": 15,
-        "posteriorHeight": 12,
-        "middleHeight": 13.5,
-        "wedgeAngle": 5.2
-      }
-    }
-  ],
-  "abnormalities": {
-    "compressionFractures": [],
-    "listhesis": [],
-    "heightProgressionIssues": []
-  }
+  "discs": [...],
+  "abnormalities": {...}
 }
 ```
-
----
-
-## 臨床規則
-
-### 壓迫性骨折判斷
-```
-前緣高度 < 後緣高度 × 0.75 → 疑似前緣壓迫性骨折
-```
-
-### 滑脫判斷
-```
-後緣連線偏移 > 椎體寬度的 5% → Spondylolisthesis/Retrolisthesis
-```
-
-### 椎間盤高度遞進
-- **L-spine**: L4/5 應該最高，L5/S1 可以稍小
-- **C-spine**: 椎間盤高度應該向下遞增
 
 ---
 
@@ -196,17 +203,26 @@ L_total = α·L_heatmap + β·L_coord + γ·L_count
 
 | 問題 | 解決方案 |
 |------|----------|
-| 找不到標註檔案 | 確認 JSON 放在 Spine 資料夾 |
-| CUDA out of memory | 修改 batch_size 為 1 |
-| 標註工具無法貼上 | 使用 Ctrl+V 或載入檔案 |
-| V1 格式相容性 | 系統會自動轉換為 V2 格式 |
+| 找不到標註檔案 | 確認 JSON 放在 Images/ 資料夾 |
+| CUDA out of memory | 修改 batch_size 為 1 或 2 |
+| V2 模型相容性 | inference_vertebra.py 自動偵測 V2/V3 checkpoint |
+| 推理結果不佳 | 確認已用 V3 模型訓練 (2_train_model.bat) |
 
 ---
 
-## 文件說明
+## 版本歷史
 
-| 文件 | 內容 |
-|------|------|
-| `README.md` | 快速入門（本文件） |
-| `USAGE_GUIDE.md` | 詳細使用指南、推理說明、問題排查 |
-| `TECHNICAL_REFERENCE.md` | 技術細節、已解決問題、API 參考 |
+### v3.0 (2026-02)
+- ResNet50 + UNet Decoder 多通道 heatmap 架構
+- Focal Loss 處理正負樣本不平衡
+- Sub-pixel Taylor expansion 精煉
+- 增強數據增強 (CLAHE, GaussianBlur, etc.)
+- 向下相容 V2 checkpoint
+
+### v2.0 (2025-10)
+- 椎體 4 角點標註 + 回歸分支
+- API 伺服器
+
+### v1.0 (初版)
+- 終板標註方式
+- 基礎 U-Net 分割

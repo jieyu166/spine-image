@@ -44,7 +44,7 @@ echo    您可以隨時按 Ctrl+C 中斷
 echo.
 pause
 
-python train_endplate_model.py
+python train_vertebra_model.py
 
 echo.
 echo ========================================

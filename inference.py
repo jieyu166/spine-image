@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
-脊椎終板檢測 - 推理腳本
-Spine Endplate Detection - Inference Script
+[DEPRECATED] 脊椎終板檢測 - 推理腳本 (V1 舊版)
+Spine Endplate Detection - Inference Script (V1 Legacy)
 
-使用訓練好的模型進行推理
+!!!  此腳本已棄用  !!!
+請改用 inference_vertebra.py (V3 椎體頂點 heatmap 模型)
+
+使用方式:
+    python inference_vertebra.py --model best_vertebra_model.pth --input image.png
+
+本腳本僅保留供 V1 endplate 模型推理使用。
 """
+import warnings
+warnings.warn(
+    "inference.py 已棄用，請改用 inference_vertebra.py (V3 heatmap 模型)",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import os
 import sys
