@@ -9,8 +9,26 @@
 - 檢測椎體滑脫（spondylolisthesis / retrolisthesis）
 - 驗證椎間盤高度遞進規律
 
-**狀態**: V3.0 Active Development
-**最後更新**: 2026-02
+**狀態**: V3.1 Active Development
+**最後更新**: 2026-02-18
+
+---
+
+## 最近更新
+
+### V3.1 模型改進 (2026-02)
+- CoordConv 座標感知卷積層
+- Channel embedding 通道嵌入
+- Backbone freezing 策略
+
+### PKL 外部資料集轉換工具 (2026-02)
+- `convert_pkl_to_contour.py`：將外部 segmentation mask (.pkl) 轉為終板輪廓點
+- `pkl-contour-editor.html`：Web 互動編輯器，醫師可篩選/刪除不需要的輪廓點後匯出 3 點 JSON
+- 資料來源：[Zenodo Dataset](https://zenodo.org/records/10223910) / [PMC 論文](https://pmc.ncbi.nlm.nih.gov/articles/PMC10858234/)
+
+### Docker 部署 & Colab (2026-02)
+- `Dockerfile` + `docker-compose.yml`：支援 Synology NAS 部署
+- `spine_inference_colab.ipynb`：Google Colab 推理 notebook
 
 ---
 
@@ -107,7 +125,9 @@ Spine/
 │   └── quick_test.py               # JSON 標註驗證
 │
 ├── 標註工具
-│   └── spinal-annotation-web.html   # V2 標註工具 (椎體4頂點)
+│   ├── spinal-annotation-web.html   # V2.3 標註工具 (椎體4頂點/6點)
+│   ├── convert_pkl_to_contour.py    # PKL mask → 終板輪廓點 JSON
+│   └── pkl-contour-editor.html      # 輪廓點互動編輯器 (篩選→匯出3點)
 │
 ├── 測試腳本
 │   ├── test_model_quick_start.py    # 模型架構快速測試
@@ -125,6 +145,15 @@ Spine/
 │   ├── train_endplate_model.py      # [V1] 終板檢測訓練
 │   ├── inference.py                 # [V1] 終板檢測推理
 │   └── api_server.py               # [V1] 終板 API (port 8000)
+│
+├── 部署
+│   ├── Dockerfile                   # Docker 映像檔
+│   ├── docker-compose.yml           # Docker Compose (Synology NAS)
+│   ├── requirements-docker.txt      # Docker 專用依賴
+│   └── SYNOLOGY_DEPLOY.md           # Synology 部署指南
+│
+├── Notebook
+│   └── spine_inference_colab.ipynb  # Google Colab 推理
 │
 ├── 文件
 │   ├── README.md                    # 本文件
@@ -211,6 +240,12 @@ Focal Loss: (1-p)^alpha * -log(p)  (alpha=2.0, beta=4.0)
 ---
 
 ## 版本歷史
+
+### v3.1 (2026-02)
+- CoordConv、Channel embedding、Backbone freezing
+- PKL 外部資料集轉換工具 (mask → 終板輪廓點 → 3 點 JSON)
+- Docker 部署支援 (Synology NAS)
+- Google Colab 推理 notebook
 
 ### v3.0 (2026-02)
 - ResNet50 + UNet Decoder 多通道 heatmap 架構
