@@ -248,6 +248,14 @@
                         <button class="view-btn" id="viewHeatmap" onclick="setView('heatmap')">熱圖</button>
                         <button class="view-btn" id="viewOriginal" onclick="setView('original')">原圖</button>
                     </div>
+                    <div class="toolbar-group">
+                        <button class="btn-secondary" id="btnExportJson" onclick="exportInferenceJson()" disabled style="font-size:13px;">
+                            💾 匯出 JSON
+                        </button>
+                        <button class="btn-secondary" id="btnOpenEditor" onclick="openInEditor()" disabled style="font-size:13px;">
+                            ✏️ 編輯標註
+                        </button>
+                    </div>
                 </div>
 
                 <div class="canvas-container">
@@ -462,6 +470,10 @@
                 renderDiscs(resultData.discs);
                 renderAlerts(resultData.vertebrae);
 
+                // 啟用匯出/編輯按鈕
+                document.getElementById('btnExportJson').disabled = false;
+                document.getElementById('btnOpenEditor').disabled = false;
+
             } catch(e) {
                 alert('分析失敗: ' + e.message);
             } finally {
@@ -598,6 +610,90 @@
                 `;
             });
             document.getElementById('alertList').innerHTML = html;
+        }
+
+        // ==================== Export JSON ====================
+        function exportInferenceJson() {
+            if (!resultData) return;
+
+            // 產生 V2.3 相容格式 (可直接匯入 spinal-annotation-web)
+            const exportObj = {
+                version: "2.3",
+                source: "ai-inference",
+                exportDate: new Date().toISOString(),
+                spineType: resultData.spine_type || 'L',
+                endplatePointMode: 2,  // AI 模型只有 4 點 (無 middle)
+                imageInfo: resultData.image_info || null,
+                vertebrae: (resultData.vertebrae || []).map(v => {
+                    const entry = {
+                        name: v.name,
+                        boundaryType: v.boundaryType || null,
+                        hasMiddlePoints: false,
+                        confidences: v.confidences || {}
+                    };
+                    const pts = v.points || {};
+                    if (v.boundaryType === 'upper') {
+                        entry.points = {
+                            anteriorSuperior: pts.anteriorSuperior,
+                            posteriorSuperior: pts.posteriorSuperior
+                        };
+                    } else if (v.boundaryType === 'lower') {
+                        entry.points = {
+                            posteriorInferior: pts.posteriorInferior,
+                            anteriorInferior: pts.anteriorInferior
+                        };
+                    } else {
+                        entry.points = {
+                            anteriorSuperior: pts.anteriorSuperior,
+                            posteriorSuperior: pts.posteriorSuperior,
+                            posteriorInferior: pts.posteriorInferior,
+                            anteriorInferior: pts.anteriorInferior
+                        };
+                    }
+                    if (v.anteriorHeight != null) entry.anteriorHeight = v.anteriorHeight;
+                    if (v.posteriorHeight != null) entry.posteriorHeight = v.posteriorHeight;
+                    if (v.heightRatio != null) entry.heightRatio = v.heightRatio;
+                    entry.anteriorWedgingFracture = v.anteriorWedgingFracture || false;
+                    entry.crushDeformityFracture = v.crushDeformityFracture || false;
+                    return entry;
+                }),
+                discs: (resultData.discs || []).map(d => ({
+                    level: d.level,
+                    anteriorHeight: d.anteriorHeight,
+                    posteriorHeight: d.posteriorHeight,
+                    middleHeight: d.middleHeight
+                }))
+            };
+
+            const blob = new Blob([JSON.stringify(exportObj, null, 2)], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const st = resultData.spine_type || 'L';
+            a.download = `inference_${st}_${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // ==================== Open in Editor ====================
+        function openInEditor() {
+            if (!resultData) return;
+
+            // 將推理結果存到 sessionStorage，讓 annotation editor 讀取
+            const exportObj = {
+                source: "ai-inference",
+                spineType: resultData.spine_type || 'L',
+                imageInfo: resultData.image_info || null,
+                vertebrae: resultData.vertebrae || [],
+                // 傳遞原圖 base64 讓編輯器可以直接載入
+                originalImageBase64: resultData._original_src || null
+            };
+            try {
+                sessionStorage.setItem('inferenceResult', JSON.stringify(exportObj));
+                window.open('spinal-annotation-web.html?import=inference', '_blank');
+            } catch(e) {
+                alert('資料太大無法傳遞，請使用「匯出 JSON」後手動匯入');
+            }
         }
     </script>
 </body>

@@ -34,6 +34,9 @@ Images/
 Thumbs.db
 desktop.ini
 
+# OneDrive sync artifacts (files with illegal NTFS chars get renamed)
+_ul
+
 # Claude
 .claude/
 

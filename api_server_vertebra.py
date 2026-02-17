@@ -137,6 +137,15 @@ async def index():
     return HTMLResponse(content="<h1>spine-inference-web.html not found</h1>", status_code=404)
 
 
+@app.get("/spinal-annotation-web.html", response_class=HTMLResponse)
+async def annotation_editor():
+    """提供標註編輯器頁面 (供 inference web 跳轉用)"""
+    html_path = SCRIPT_DIR / "spinal-annotation-web.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text(encoding='utf-8'))
+    return HTMLResponse(content="<h1>spinal-annotation-web.html not found</h1>", status_code=404)
+
+
 @app.get("/health")
 async def health():
     return {

@@ -1,0 +1,22 @@
+# ======================================================
+# Spine Vertebra Detection - Docker Compose
+# 用於 Synology NAS Container Manager 部署
+# ======================================================
+
+services:
+  spine-api:
+    build: .
+    container_name: spine-vertebra-api
+    ports:
+      - "8001:8001"
+    volumes:
+      # 掛載模型檔案 (方便更新模型不用重建 image)
+      - ./best_vertebra_model.pth:/app/best_vertebra_model.pth:ro
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Synology NAS 記憶體限制建議
+    deploy:
+      resources:
+        limits:
+          memory: 4G

@@ -399,6 +399,7 @@
                     <div class="toolbar-group">
                         <button class="btn-primary" onclick="loadImage()">📂 載入影像</button>
                         <button class="btn-primary" onclick="pasteImage()">📋 貼上 (Ctrl+V)</button>
+                        <button class="btn-secondary" onclick="document.getElementById('jsonInput').click()" style="font-size:13px;">📥 匯入 JSON</button>
                     </div>
                     <div class="toolbar-group">
                         <button class="btn-warning" onclick="undoPoint()">↶ 撤銷點</button>
@@ -483,6 +484,7 @@
     </div>
 
     <input type="file" id="fileInput" accept="image/*" style="display: none;" onchange="handleFileSelect(event)">
+    <input type="file" id="jsonInput" accept=".json" style="display: none;" onchange="handleJsonImport(event)">
 
     <script>
         // ==================== 配置 ====================
@@ -601,6 +603,9 @@
 
             updateUI();
             updateEndplateModeUI();
+
+            // 檢查是否從推理頁面跳轉過來 (自動匯入)
+            checkAutoImport();
         };
 
         // ==================== 影像處理 ====================
@@ -714,15 +719,76 @@
             redraw();
         }
 
+        // ── 角點拖曳狀態 ──
+        let dragInfo = null;  // {vertebraIdx, pointIdx} 正在拖曳的角點
+        let _justDragged = false;  // 防止拖曳結束後觸發 click
+
+        function _canvasToImage(e) {
+            // 將滑鼠座標轉為影像座標
+            const rect = canvas.getBoundingClientRect();
+            const cssToCanvasX = canvas.width / rect.width;
+            const cssToCanvasY = canvas.height / rect.height;
+            const cx = (e.clientX - rect.left) * cssToCanvasX;
+            const cy = (e.clientY - rect.top) * cssToCanvasY;
+            const imgX = (cx - panX) / zoom;
+            const imgY = (cy - panY) / zoom;
+            return {imgX, imgY};
+        }
+
+        function _findNearestPoint(imgX, imgY, threshold) {
+            // 在所有已標註椎體中找最近的角點
+            const th2 = threshold * threshold;
+            let best = null;
+            let bestDist = Infinity;
+            for (let vi = 0; vi < vertebrae.length; vi++) {
+                const pts = vertebrae[vi].points;
+                for (let pi = 0; pi < pts.length; pi++) {
+                    const dx = pts[pi].x - imgX;
+                    const dy = pts[pi].y - imgY;
+                    const d2 = dx*dx + dy*dy;
+                    if (d2 < th2 && d2 < bestDist) {
+                        bestDist = d2;
+                        best = {vertebraIdx: vi, pointIdx: pi};
+                    }
+                }
+            }
+            return best;
+        }
+
         function handleMouseDown(e) {
             if (e.button === 1 || e.button === 2) {
+                // 中/右鍵: 平移
                 isDragging = true;
                 lastMousePos = {x: e.clientX, y: e.clientY};
                 e.preventDefault();
+                return;
+            }
+
+            if (e.button === 0 && vertebrae.length > 0) {
+                // 左鍵: 檢查是否在已有角點附近 → 開始拖曳
+                const {imgX, imgY} = _canvasToImage(e);
+                const hitRadius = 12 / zoom;  // 12px 容差 (考慮縮放)
+                const hit = _findNearestPoint(imgX, imgY, hitRadius);
+                if (hit) {
+                    dragInfo = hit;
+                    e.preventDefault();
+                    canvas.style.cursor = 'grabbing';
+                    return;
+                }
             }
         }
 
         function handleMouseMove(e) {
+            if (dragInfo) {
+                // 拖曳角點
+                const {imgX, imgY} = _canvasToImage(e);
+                const pt = vertebrae[dragInfo.vertebraIdx].points[dragInfo.pointIdx];
+                pt.x = imgX;
+                pt.y = imgY;
+                redraw();
+                return;
+            }
+
             if (isDragging) {
                 const rect = canvas.getBoundingClientRect();
                 const cssToCanvasX = canvas.width / rect.width;
@@ -732,10 +798,28 @@
                 lastMousePos = {x: e.clientX, y: e.clientY};
                 wasDragging = true;
                 redraw();
+                return;
+            }
+
+            // 滑鼠懸停: 靠近角點時改變游標
+            if (vertebrae.length > 0) {
+                const {imgX, imgY} = _canvasToImage(e);
+                const hitRadius = 12 / zoom;
+                const hit = _findNearestPoint(imgX, imgY, hitRadius);
+                canvas.style.cursor = hit ? 'grab' : 'crosshair';
             }
         }
 
-        function handleMouseUp() {
+        function handleMouseUp(e) {
+            if (dragInfo) {
+                // 拖曳結束: 重新計算該椎體的指標
+                calculateVertebraMetrics(dragInfo.vertebraIdx);
+                updateUI();
+                dragInfo = null;
+                _justDragged = true;  // 防止接下來的 click 事件新增點
+                canvas.style.cursor = 'crosshair';
+                return;
+            }
             isDragging = false;
             // wasDragging 由 contextmenu handler 重置，不在此重置
         }
@@ -785,7 +869,7 @@
 
         // ==================== 點擊處理 ====================
         function handleCanvasClick(event) {
-            if (!originalImage || isDragging) return;
+            if (!originalImage || isDragging || _justDragged) { _justDragged = false; return; }
 
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
@@ -1005,6 +1089,165 @@
             annotationFinished = true;
             redraw();
             updateUI();
+        }
+
+        // ==================== 匯入 JSON ====================
+        function handleJsonImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            event.target.value = ''; // 允許重複選取同一檔案
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    importAnnotationJson(data);
+                } catch(err) {
+                    alert('JSON 解析失敗: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function importAnnotationJson(data) {
+            // 支援多種格式:
+            // 1. V2.3 標註格式 (spinal-annotation-web 匯出)
+            // 2. AI 推理結果格式 (spine-inference-web 匯出)
+            // 3. 原始推理 API 回傳格式
+
+            const srcVertebrae = data.vertebrae;
+            if (!srcVertebrae || srcVertebrae.length === 0) {
+                alert('JSON 中沒有找到椎體資料');
+                return;
+            }
+
+            // 設定脊椎類型
+            const st = data.spineType || data.spine_type || 'L';
+            spineType = st;
+            document.querySelectorAll('.spine-type-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.type === st);
+            });
+
+            // 如果 JSON 帶有原圖 base64，自動載入
+            if (data.originalImageBase64) {
+                const img = new Image();
+                img.onload = function() {
+                    originalImage = img;
+                    canvas.width = Math.min(img.width, 1200);
+                    canvas.height = Math.round(canvas.width * (img.height / img.width));
+                    zoom = canvas.width / img.width;
+                    panX = 0; panY = 0;
+                    _finishImport(srcVertebrae, data);
+                };
+                img.src = data.originalImageBase64;
+                return;
+            }
+
+            _finishImport(srcVertebrae, data);
+        }
+
+        function _finishImport(srcVertebrae, data) {
+            // 清除現有標註
+            vertebrae = [];
+            currentPoints = [];
+            annotationFinished = false;
+
+            const config = CONFIG[spineType];
+
+            // 轉換每個椎體到內部格式
+            for (const sv of srcVertebrae) {
+                const name = sv.name;
+                const bt = sv.boundaryType || null;
+                const pts = sv.points;
+                if (!pts) continue;
+
+                let internalPoints;
+
+                if (bt === 'upper') {
+                    // 上邊界: 需要 3 點 [AS, MS, PS]
+                    const as = pts.anteriorSuperior;
+                    const ps = pts.posteriorSuperior;
+                    if (!as || !ps) continue;
+                    const ms = pts.middleSuperior || midpoint(as, ps);
+                    internalPoints = [
+                        {x: as.x, y: as.y},
+                        {x: ms.x, y: ms.y},
+                        {x: ps.x, y: ps.y}
+                    ];
+                } else if (bt === 'lower') {
+                    // 下邊界: 需要 3 點 [AI, MI, PI]
+                    const ai = pts.anteriorInferior;
+                    const pi = pts.posteriorInferior;
+                    if (!ai || !pi) continue;
+                    const mi = pts.middleInferior || midpoint(ai, pi);
+                    internalPoints = [
+                        {x: ai.x, y: ai.y},
+                        {x: mi.x, y: mi.y},
+                        {x: pi.x, y: pi.y}
+                    ];
+                } else {
+                    // 完整椎體: 需要 6 點 [AS, MS, PS, PI, MI, AI]
+                    const as = pts.anteriorSuperior;
+                    const ps = pts.posteriorSuperior;
+                    const pi = pts.posteriorInferior;
+                    const ai = pts.anteriorInferior;
+                    if (!as || !ps || !pi || !ai) continue;
+                    // 自動計算 middle 點 (AI 推理結果沒有 middle 點)
+                    const ms = pts.middleSuperior || midpoint(as, ps);
+                    const mi = pts.middleInferior || midpoint(ai, pi);
+                    internalPoints = [
+                        {x: as.x, y: as.y},
+                        {x: ms.x, y: ms.y},
+                        {x: ps.x, y: ps.y},
+                        {x: pi.x, y: pi.y},
+                        {x: mi.x, y: mi.y},
+                        {x: ai.x, y: ai.y}
+                    ];
+                }
+
+                const v = {
+                    name: name,
+                    points: internalPoints,
+                    boundaryType: bt,
+                    hasMiddlePoints: true,
+                    anteriorHeight: null,
+                    posteriorHeight: null,
+                    middleHeight: null
+                };
+                vertebrae.push(v);
+            }
+
+            // 計算所有椎體的指標
+            for (let i = 0; i < vertebrae.length; i++) {
+                calculateVertebraMetrics(i);
+            }
+
+            // 標記為已完成 (匯入的標註可直接編輯)
+            annotationFinished = true;
+            endplatePointMode = 3; // 匯入後以 3 點模式顯示
+
+            redraw();
+            updateUI();
+
+            const src = data.source === 'ai-inference' ? ' (AI 推理結果)' : '';
+            alert(`成功匯入 ${vertebrae.length} 個椎體${src}\n\n可拖曳角點進行修正，完成後匯出 JSON`);
+        }
+
+        // 自動從 sessionStorage 載入推理結果 (從 inference web 跳轉)
+        function checkAutoImport() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('import') === 'inference') {
+                try {
+                    const stored = sessionStorage.getItem('inferenceResult');
+                    if (stored) {
+                        sessionStorage.removeItem('inferenceResult');
+                        const data = JSON.parse(stored);
+                        importAnnotationJson(data);
+                    }
+                } catch(e) {
+                    console.error('Auto-import failed:', e);
+                }
+            }
         }
 
         // ==================== 繪製 ====================
