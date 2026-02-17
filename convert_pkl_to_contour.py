@@ -77,10 +77,10 @@ def extract_contour(mask):
 def split_endplates(contour_pts):
     """將椎體輪廓分為上終板和下終板
 
-    策略:
-    1. 找到輪廓的最左和最右端點
-    2. 從左到右，上半部分為上終板，下半部分為下終板
-    3. 用 Y 座標中位數分割：上方=上終板，下方=下終板
+    策略 (Left-Right Arc method):
+    cv2.findContours 回傳的輪廓是有序環路。找到最左和最右端點，
+    這兩點自然將環路分成上弧 (superior) 和下弧 (inferior)，
+    不受椎體傾斜角度影響。
 
     Returns:
         (superior_pts, inferior_pts) - 各為 (N, 2) numpy array，
@@ -89,23 +89,32 @@ def split_endplates(contour_pts):
     if contour_pts is None or len(contour_pts) < 4:
         return None, None
 
-    # 找 bounding box 的上下界
-    y_min = contour_pts[:, 1].min()
-    y_max = contour_pts[:, 1].max()
-    y_mid = (y_min + y_max) / 2
+    n = len(contour_pts)
 
-    # 上終板: Y < y_mid 的點
-    sup_mask = contour_pts[:, 1] <= y_mid
-    inf_mask = contour_pts[:, 1] >= y_mid
+    # 找最左和最右端點的索引
+    idx_left = int(np.argmin(contour_pts[:, 0]))
+    idx_right = int(np.argmax(contour_pts[:, 0]))
 
-    sup_pts = contour_pts[sup_mask]
-    inf_pts = contour_pts[inf_mask]
+    # 沿著有序環路分成兩段弧
+    if idx_left < idx_right:
+        arc1_idx = list(range(idx_left, idx_right + 1))
+        arc2_idx = list(range(idx_right, n)) + list(range(0, idx_left + 1))
+    else:
+        arc1_idx = list(range(idx_left, n)) + list(range(0, idx_right + 1))
+        arc2_idx = list(range(idx_right, idx_left + 1))
+
+    arc1 = contour_pts[arc1_idx]
+    arc2 = contour_pts[arc2_idx]
+
+    # 平均 Y 較小的 = 上終板 (影像座標系 Y 向下)
+    if arc1[:, 1].mean() < arc2[:, 1].mean():
+        sup_pts, inf_pts = arc1, arc2
+    else:
+        sup_pts, inf_pts = arc2, arc1
 
     # 按 X 排序
-    if len(sup_pts) > 0:
-        sup_pts = sup_pts[sup_pts[:, 0].argsort()]
-    if len(inf_pts) > 0:
-        inf_pts = inf_pts[inf_pts[:, 0].argsort()]
+    sup_pts = sup_pts[sup_pts[:, 0].argsort()]
+    inf_pts = inf_pts[inf_pts[:, 0].argsort()]
 
     return sup_pts, inf_pts
 

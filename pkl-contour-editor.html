@@ -334,7 +334,7 @@
             <div class="canvas-container" id="canvasContainer">
                 <canvas id="mainCanvas"></canvas>
                 <div class="zoom-info" id="zoomInfo">100%</div>
-                <div class="mode-info" id="modeInfo">橡皮擦模式 - 點擊/拖曳刪除點</div>
+                <div class="mode-info" id="modeInfo">橡皮擦模式 — 左鍵: 刪除點 | 右鍵: 切換上↔下終板</div>
             </div>
         </div>
 
@@ -344,7 +344,9 @@
                 <div class="section-title">操作說明</div>
                 <div class="status-bar" id="statusBar">
                     1. 載入 <code>.contour.json</code> (由 Python 腳本生成)<br>
-                    2. 左側選擇椎體，用橡皮擦刪除不需要的點<br>
+                    2. 左側選擇椎體，按 <b>E</b> 進入橡皮擦模式<br>
+                    &nbsp;&nbsp;&nbsp;• <b>左鍵</b>拖曳：刪除不要的點<br>
+                    &nbsp;&nbsp;&nbsp;• <b>右鍵</b>點擊：切換 <span class="color-sup">上終板</span> ↔ <span class="color-inf">下終板</span><br>
                     3. 完成後匯出 JSON
                 </div>
             </div>
@@ -607,14 +609,27 @@ function handleWheel(e) {
 function handleMouseDown(e) {
     if (!sourceData) return;
 
-    if (e.button === 1 || e.button === 2) {
-        // Middle/right: pan
+    // Middle button: always pan
+    if (e.button === 1) {
         isPanning = true;
         lastPanX = e.clientX;
         lastPanY = e.clientY;
         return;
     }
 
+    // Right button: pan (normal mode) or reassign endplate (eraser mode)
+    if (e.button === 2) {
+        if (eraseMode) {
+            reassignAtPosition(e);
+        } else {
+            isPanning = true;
+            lastPanX = e.clientX;
+            lastPanY = e.clientY;
+        }
+        return;
+    }
+
+    // Left button: erase in eraser mode
     if (e.button === 0 && eraseMode) {
         isErasing = true;
         eraseAtPosition(e);
@@ -716,6 +731,70 @@ function eraseAtPosition(e) {
     });
 
     if (erased) redraw();
+}
+
+function reassignAtPosition(e) {
+    /**
+     * 右鍵：將橡皮擦半徑內的點在 superior ↔ inferior 之間切換
+     * - superior 的點 → 移到 inferior（按 X 插入正確位置）
+     * - inferior 的點 → 移到 superior
+     */
+    if (!sourceData || selectedVertebra === null) return;
+
+    const pos = canvasToImage(e);
+    const r = eraserRadiusVal;
+    const r2 = r * r;
+    const v = sourceData.vertebrae[selectedVertebra];
+    let changed = false;
+
+    // Collect points to move from superior → inferior
+    const supToInf = [];
+    if (v.superiorEndplate) {
+        v.superiorEndplate = v.superiorEndplate.filter(pt => {
+            const dx = pt.x - pos.x;
+            const dy = pt.y - pos.y;
+            if (dx * dx + dy * dy <= r2) {
+                supToInf.push(pt);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    // Collect points to move from inferior → superior
+    const infToSup = [];
+    if (v.inferiorEndplate) {
+        v.inferiorEndplate = v.inferiorEndplate.filter(pt => {
+            const dx = pt.x - pos.x;
+            const dy = pt.y - pos.y;
+            if (dx * dx + dy * dy <= r2) {
+                infToSup.push(pt);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    // Move superior → inferior
+    if (supToInf.length > 0) {
+        if (!v.inferiorEndplate) v.inferiorEndplate = [];
+        v.inferiorEndplate.push(...supToInf);
+        v.inferiorEndplate.sort((a, b) => a.x - b.x);
+        changed = true;
+    }
+
+    // Move inferior → superior
+    if (infToSup.length > 0) {
+        if (!v.superiorEndplate) v.superiorEndplate = [];
+        v.superiorEndplate.push(...infToSup);
+        v.superiorEndplate.sort((a, b) => a.x - b.x);
+        changed = true;
+    }
+
+    if (changed) {
+        buildVertebralList();
+        redraw();
+    }
 }
 
 function undoLastErase() {
