@@ -144,7 +144,7 @@ def process_single_pkl(pkl_path, max_points_per_endplate=50):
     """處理單一 pkl 檔案
 
     Returns:
-        dict: 可直接序列化為 JSON 的結構
+        (dict, np.ndarray): JSON 結構, 原始影像 array
     """
     pkl_path = Path(pkl_path)
     print(f"Loading: {pkl_path.name}")
@@ -233,7 +233,7 @@ def process_single_pkl(pkl_path, max_points_per_endplate=50):
         'maxPointsPerEndplate': max_points_per_endplate,
     }
 
-    return result
+    return result, image
 
 
 def main():
@@ -245,6 +245,10 @@ def main():
                         help='輸出 JSON 路徑 (預設: 同名 .contour.json)')
     parser.add_argument('--max-points', type=int, default=50,
                         help='每個終板最大輪廓點數 (預設: 50)')
+    parser.add_argument('--no-image', action='store_true',
+                        help='不輸出 PNG 影像檔 (預設會輸出)')
+    parser.add_argument('--image-format', choices=['png', 'jpg'], default='png',
+                        help='影像輸出格式 (預設: png)')
 
     args = parser.parse_args()
     input_path = Path(args.input)
@@ -258,7 +262,7 @@ def main():
         pkl_files = [input_path]
 
     for pkl_file in pkl_files:
-        result = process_single_pkl(pkl_file, args.max_points)
+        result, raw_image = process_single_pkl(pkl_file, args.max_points)
 
         if args.output and len(pkl_files) == 1:
             output_path = Path(args.output)
@@ -270,7 +274,18 @@ def main():
 
         # 檔案大小
         size_mb = output_path.stat().st_size / (1024 * 1024)
-        print(f"  Output: {output_path} ({size_mb:.1f} MB)")
+        print(f"  JSON: {output_path} ({size_mb:.1f} MB)")
+
+        # 輸出原始影像
+        if not args.no_image and raw_image is not None:
+            ext = '.' + args.image_format
+            img_path = pkl_file.with_suffix(ext)
+            if args.image_format == 'jpg':
+                cv2.imwrite(str(img_path), raw_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            else:
+                cv2.imwrite(str(img_path), raw_image)
+            img_size_mb = img_path.stat().st_size / (1024 * 1024)
+            print(f"  Image: {img_path} ({img_size_mb:.1f} MB)")
 
     print(f"\nDone! {len(pkl_files)} file(s) converted.")
     print("Open pkl-contour-editor.html to edit and export.")

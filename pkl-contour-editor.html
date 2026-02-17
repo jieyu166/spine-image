@@ -367,6 +367,9 @@
                     <button class="btn-info" onclick="exportToAnnotationTool()" id="btnOpenAnnotation" disabled>
                         匯出並在標註工具中開啟
                     </button>
+                    <button class="btn-warning" onclick="exportImage()" id="btnExportImage" disabled>
+                        匯出原始影像 (PNG)
+                    </button>
                     <div class="help-text">
                         匯出格式與 spinal-annotation-web.html 完全相容
                     </div>
@@ -449,6 +452,7 @@ function loadData() {
             `${sourceData.sourcePkl || 'unknown'} | ${sourceData.spineType}-spine | ${img.width}x${img.height}`;
         document.getElementById('btnExport').disabled = false;
         document.getElementById('btnOpenAnnotation').disabled = false;
+        document.getElementById('btnExportImage').disabled = false;
     };
     img.src = sourceData.imageBase64;
 }
@@ -1060,6 +1064,18 @@ function exportJSON() {
     a.download = baseName + '.json';
     a.click();
     URL.revokeObjectURL(url);
+}
+
+function exportImage() {
+    if (!sourceData || !sourceData.imageBase64) {
+        alert('No image data'); return;
+    }
+
+    const a = document.createElement('a');
+    a.href = sourceData.imageBase64;
+    const baseName = (sourceData.sourcePkl || 'image').replace('.pkl', '');
+    a.download = baseName + '.png';
+    a.click();
 }
 
 function exportToAnnotationTool() {
