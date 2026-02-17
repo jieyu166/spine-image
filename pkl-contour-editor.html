@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PKL 終板輪廓編輯器 - Endplate Contour Editor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Microsoft JhengHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 15px;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 { font-size: 22px; }
+        .header-info { font-size: 13px; opacity: 0.9; }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            min-height: calc(100vh - 150px);
+        }
+
+        .image-section {
+            padding: 15px;
+            background: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .toolbar-group {
+            display: flex;
+            gap: 5px;
+            padding: 5px 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        button:hover { transform: translateY(-1px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-primary { background: #3498db; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-secondary { background: #95a5a6; color: white; }
+        .btn-info { background: #9b59b6; color: white; }
+
+        .canvas-container {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #2c3e50;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        canvas { cursor: crosshair; }
+
+        .zoom-info {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .mode-info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(231, 76, 60, 0.9);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            display: none;
+        }
+
+        .mode-info.active { display: block; }
+
+        .sidebar {
+            background: white;
+            padding: 15px;
+            overflow-y: auto;
+            border-left: 2px solid #e0e0e0;
+        }
+
+        .section { margin-bottom: 20px; }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            background: #ecf0f1;
+            border-radius: 6px;
+            border-left: 4px solid #3498db;
+        }
+
+        .vertebra-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+
+        .vertebra-card.selected {
+            border-color: #3498db;
+            box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.3);
+        }
+
+        .vertebra-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            background: #e9ecef;
+            cursor: pointer;
+        }
+
+        .vertebra-header:hover { background: #dee2e6; }
+
+        .vertebra-name { font-weight: bold; color: #495057; }
+
+        .vertebra-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            color: white;
+        }
+
+        .badge-boundary { background: #f39c12; }
+        .badge-full { background: #27ae60; }
+
+        .vertebra-body {
+            padding: 10px 12px;
+            font-size: 12px;
+        }
+
+        .endplate-section {
+            margin-bottom: 8px;
+        }
+
+        .endplate-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #495057;
+        }
+
+        .endplate-label .point-count {
+            font-weight: normal;
+            color: #6c757d;
+        }
+
+        .endplate-actions {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-top: 4px;
+        }
+
+        .endplate-actions button {
+            padding: 4px 8px;
+            font-size: 11px;
+        }
+
+        .status-bar {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+
+        .export-panel {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .export-panel button {
+            width: 100%;
+            margin-top: 8px;
+            justify-content: center;
+        }
+
+        .help-text {
+            font-size: 11px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .color-sup { color: #e74c3c; }
+        .color-inf { color: #3498db; }
+
+        /* eraser cursor */
+        canvas.eraser-mode { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='10' fill='none' stroke='red' stroke-width='2'/%3E%3Cline x1='6' y1='6' x2='18' y2='18' stroke='red' stroke-width='2'/%3E%3C/svg%3E") 12 12, crosshair; }
+
+        .legend {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+            padding: 8px 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- Header -->
+    <div class="header">
+        <div>
+            <h1>PKL 終板輪廓編輯器</h1>
+            <div class="header-info">Mask → 終板輪廓點 → 3點 JSON (相容本專案標註格式)</div>
+        </div>
+        <div class="header-info" id="fileInfo">未載入檔案</div>
+    </div>
+
+    <div class="main-content">
+        <!-- Image Area -->
+        <div class="image-section">
+            <div class="toolbar">
+                <div class="toolbar-group">
+                    <button class="btn-primary" onclick="document.getElementById('fileInput').click()">
+                        載入 .contour.json
+                    </button>
+                    <input type="file" id="fileInput" accept=".json" style="display:none"
+                           onchange="handleFileLoad(event)">
+                </div>
+
+                <div class="toolbar-group">
+                    <button class="btn-danger" id="btnEraseMode" onclick="toggleEraseMode()">
+                        橡皮擦模式 (E)
+                    </button>
+                    <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
+                        半徑:
+                        <input type="range" id="eraserRadius" min="5" max="80" value="20"
+                               style="width:80px" oninput="eraserRadiusVal=+this.value">
+                        <span id="eraserRadiusLabel">20</span>px
+                    </label>
+                </div>
+
+                <div class="toolbar-group">
+                    <button class="btn-secondary" onclick="resetZoom()">重設縮放</button>
+                    <button class="btn-warning" onclick="undoLastErase()">復原 (Ctrl+Z)</button>
+                </div>
+            </div>
+
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#e74c3c"></div>
+                    上終板 (Superior)
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#3498db"></div>
+                    下終板 (Inferior)
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:rgba(255,255,0,0.5)"></div>
+                    選中椎體
+                </div>
+            </div>
+
+            <div class="canvas-container" id="canvasContainer">
+                <canvas id="mainCanvas"></canvas>
+                <div class="zoom-info" id="zoomInfo">100%</div>
+                <div class="mode-info" id="modeInfo">橡皮擦模式 - 點擊/拖曳刪除點</div>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="section">
+                <div class="section-title">操作說明</div>
+                <div class="status-bar" id="statusBar">
+                    1. 載入 <code>.contour.json</code> (由 Python 腳本生成)<br>
+                    2. 左側選擇椎體，用橡皮擦刪除不需要的點<br>
+                    3. 完成後匯出 JSON
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">椎體列表</div>
+                <div id="vertebraList"></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">匯出</div>
+                <div class="export-panel">
+                    <div style="font-size:13px; margin-bottom:8px;">
+                        每個終板自動降採樣為 <strong>3 點</strong><br>
+                        (anterior + middle + posterior)
+                    </div>
+                    <button class="btn-success" onclick="exportJSON()" id="btnExport" disabled>
+                        匯出 V2.3 JSON
+                    </button>
+                    <button class="btn-info" onclick="exportToAnnotationTool()" id="btnOpenAnnotation" disabled>
+                        匯出並在標註工具中開啟
+                    </button>
+                    <div class="help-text">
+                        匯出格式與 spinal-annotation-web.html 完全相容
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════
+let sourceData = null;       // loaded .contour.json
+let img = new Image();
+let canvas, ctx;
+let zoom = 1, panX = 0, panY = 0;
+let isPanning = false, lastPanX = 0, lastPanY = 0;
+let eraseMode = false;
+let eraserRadiusVal = 20;
+let isErasing = false;
+let selectedVertebra = null; // index into sourceData.vertebrae
+let undoStack = [];          // for undo
+
+// ══════════════════════════════════════════════
+// Init
+// ══════════════════════════════════════════════
+window.onload = function() {
+    canvas = document.getElementById('mainCanvas');
+    ctx = canvas.getContext('2d');
+    setupCanvasEvents();
+
+    document.getElementById('eraserRadius').addEventListener('input', function() {
+        document.getElementById('eraserRadiusLabel').textContent = this.value;
+    });
+};
+
+// ══════════════════════════════════════════════
+// File Loading
+// ══════════════════════════════════════════════
+function handleFileLoad(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+        try {
+            sourceData = JSON.parse(ev.target.result);
+            loadData();
+        } catch (err) {
+            alert('JSON 解析失敗: ' + err.message);
+        }
+    };
+    reader.readAsText(file);
+}
+
+function loadData() {
+    if (!sourceData || !sourceData.imageBase64) {
+        alert('JSON 中沒有影像資料 (imageBase64)');
+        return;
+    }
+
+    img.onload = function() {
+        const container = document.getElementById('canvasContainer');
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+
+        // Fit image
+        const scaleX = canvas.width / img.width;
+        const scaleY = canvas.height / img.height;
+        zoom = Math.min(scaleX, scaleY) * 0.95;
+        panX = (canvas.width - img.width * zoom) / 2;
+        panY = (canvas.height - img.height * zoom) / 2;
+
+        selectedVertebra = 0;
+        buildVertebralList();
+        redraw();
+
+        document.getElementById('fileInfo').textContent =
+            `${sourceData.sourcePkl || 'unknown'} | ${sourceData.spineType}-spine | ${img.width}x${img.height}`;
+        document.getElementById('btnExport').disabled = false;
+        document.getElementById('btnOpenAnnotation').disabled = false;
+    };
+    img.src = sourceData.imageBase64;
+}
+
+// ══════════════════════════════════════════════
+// Sidebar - Vertebra List
+// ══════════════════════════════════════════════
+function buildVertebralList() {
+    const container = document.getElementById('vertebraList');
+    container.innerHTML = '';
+
+    sourceData.vertebrae.forEach((v, i) => {
+        const card = document.createElement('div');
+        card.className = 'vertebra-card' + (i === selectedVertebra ? ' selected' : '');
+        card.id = 'vcard-' + i;
+
+        const bt = v.boundaryType;
+        const badgeClass = bt ? 'badge-boundary' : 'badge-full';
+        const badgeText = bt === 'upper' ? '上邊界' : bt === 'lower' ? '下邊界' : '完整';
+
+        const supCount = (v.superiorEndplate || []).length;
+        const infCount = (v.inferiorEndplate || []).length;
+
+        let bodyHTML = '';
+
+        if (v.superiorEndplate) {
+            bodyHTML += `
+                <div class="endplate-section">
+                    <div class="endplate-label">
+                        <span class="color-sup">上終板 (Superior)</span>
+                        <span class="point-count">${supCount} pts</span>
+                    </div>
+                    <div class="endplate-actions">
+                        <button class="btn-danger" onclick="clearEndplate(${i}, 'superior')" style="font-size:10px; padding:2px 6px;">
+                            清除全部
+                        </button>
+                    </div>
+                </div>`;
+        }
+
+        if (v.inferiorEndplate) {
+            bodyHTML += `
+                <div class="endplate-section">
+                    <div class="endplate-label">
+                        <span class="color-inf">下終板 (Inferior)</span>
+                        <span class="point-count">${infCount} pts</span>
+                    </div>
+                    <div class="endplate-actions">
+                        <button class="btn-danger" onclick="clearEndplate(${i}, 'inferior')" style="font-size:10px; padding:2px 6px;">
+                            清除全部
+                        </button>
+                    </div>
+                </div>`;
+        }
+
+        card.innerHTML = `
+            <div class="vertebra-header" onclick="selectVertebra(${i})">
+                <span class="vertebra-name">${v.name}</span>
+                <span class="vertebra-badge ${badgeClass}">${badgeText} | S:${supCount} I:${infCount}</span>
+            </div>
+            <div class="vertebra-body">${bodyHTML}</div>`;
+
+        container.appendChild(card);
+    });
+}
+
+function selectVertebra(idx) {
+    selectedVertebra = idx;
+    // Update card selection UI
+    document.querySelectorAll('.vertebra-card').forEach((card, i) => {
+        card.classList.toggle('selected', i === idx);
+    });
+    redraw();
+}
+
+function clearEndplate(vIdx, type) {
+    const v = sourceData.vertebrae[vIdx];
+    const key = type === 'superior' ? 'superiorEndplate' : 'inferiorEndplate';
+    if (!v[key]) return;
+
+    // Save undo
+    undoStack.push({
+        action: 'clearEndplate',
+        vIdx, key,
+        points: JSON.parse(JSON.stringify(v[key]))
+    });
+
+    v[key] = [];
+    buildVertebralList();
+    redraw();
+}
+
+// ══════════════════════════════════════════════
+// Canvas Events
+// ══════════════════════════════════════════════
+function setupCanvasEvents() {
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('mouseleave', handleMouseUp);
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'e' || e.key === 'E') {
+            toggleEraseMode();
+        }
+        if (e.ctrlKey && e.key === 'z') {
+            e.preventDefault();
+            undoLastErase();
+        }
+        // Navigate vertebrae
+        if (e.key === 'ArrowUp' && sourceData) {
+            e.preventDefault();
+            selectVertebra(Math.max(0, selectedVertebra - 1));
+        }
+        if (e.key === 'ArrowDown' && sourceData) {
+            e.preventDefault();
+            selectVertebra(Math.min(sourceData.vertebrae.length - 1, selectedVertebra + 1));
+        }
+    });
+}
+
+function canvasToImage(e) {
+    const rect = canvas.getBoundingClientRect();
+    const cssToCanvasX = canvas.width / rect.width;
+    const cssToCanvasY = canvas.height / rect.height;
+    const canvasX = (e.clientX - rect.left) * cssToCanvasX;
+    const canvasY = (e.clientY - rect.top) * cssToCanvasY;
+    const imgX = (canvasX - panX) / zoom;
+    const imgY = (canvasY - panY) / zoom;
+    return { x: imgX, y: imgY, canvasX, canvasY };
+}
+
+function handleWheel(e) {
+    e.preventDefault();
+    if (!img.src) return;
+
+    const pos = canvasToImage(e);
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(0.05, Math.min(10, zoom * delta));
+
+    panX = pos.canvasX - pos.x * newZoom;
+    panY = pos.canvasY - pos.y * newZoom;
+    zoom = newZoom;
+
+    document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%';
+    redraw();
+}
+
+function handleMouseDown(e) {
+    if (!sourceData) return;
+
+    if (e.button === 1 || e.button === 2) {
+        // Middle/right: pan
+        isPanning = true;
+        lastPanX = e.clientX;
+        lastPanY = e.clientY;
+        return;
+    }
+
+    if (e.button === 0 && eraseMode) {
+        isErasing = true;
+        eraseAtPosition(e);
+    }
+}
+
+function handleMouseMove(e) {
+    if (isPanning) {
+        const rect = canvas.getBoundingClientRect();
+        const cssToCanvasX = canvas.width / rect.width;
+        const cssToCanvasY = canvas.height / rect.height;
+        panX += (e.clientX - lastPanX) * cssToCanvasX;
+        panY += (e.clientY - lastPanY) * cssToCanvasY;
+        lastPanX = e.clientX;
+        lastPanY = e.clientY;
+        redraw();
+        return;
+    }
+
+    if (isErasing && eraseMode) {
+        eraseAtPosition(e);
+        return;
+    }
+
+    // Show eraser cursor preview
+    if (eraseMode) {
+        redraw();
+        // Draw eraser circle
+        const pos = canvasToImage(e);
+        ctx.save();
+        ctx.translate(panX, panY);
+        ctx.scale(zoom, zoom);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, eraserRadiusVal, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+        ctx.lineWidth = 2 / zoom;
+        ctx.stroke();
+        ctx.restore();
+    }
+}
+
+function handleMouseUp(e) {
+    isPanning = false;
+    if (isErasing) {
+        isErasing = false;
+        buildVertebralList();
+    }
+}
+
+// ══════════════════════════════════════════════
+// Eraser
+// ══════════════════════════════════════════════
+function toggleEraseMode() {
+    eraseMode = !eraseMode;
+    const btn = document.getElementById('btnEraseMode');
+    const modeInfo = document.getElementById('modeInfo');
+
+    if (eraseMode) {
+        btn.style.background = '#c0392b';
+        btn.textContent = '橡皮擦模式 ON (E)';
+        modeInfo.classList.add('active');
+        canvas.classList.add('eraser-mode');
+    } else {
+        btn.style.background = '';
+        btn.textContent = '橡皮擦模式 (E)';
+        modeInfo.classList.remove('active');
+        canvas.classList.remove('eraser-mode');
+        redraw();
+    }
+}
+
+function eraseAtPosition(e) {
+    if (!sourceData || selectedVertebra === null) return;
+
+    const pos = canvasToImage(e);
+    const r = eraserRadiusVal;
+    const r2 = r * r;
+    const v = sourceData.vertebrae[selectedVertebra];
+    let erased = false;
+
+    ['superiorEndplate', 'inferiorEndplate'].forEach(key => {
+        if (!v[key]) return;
+        const before = v[key].length;
+        v[key] = v[key].filter(pt => {
+            const dx = pt.x - pos.x;
+            const dy = pt.y - pos.y;
+            return dx * dx + dy * dy > r2;
+        });
+        if (v[key].length < before) {
+            erased = true;
+            // Save undo info (lightweight: just record that we erased)
+            undoStack.push({
+                action: 'erase',
+                vIdx: selectedVertebra,
+                key,
+                removedCount: before - v[key].length
+            });
+        }
+    });
+
+    if (erased) redraw();
+}
+
+function undoLastErase() {
+    if (undoStack.length === 0) return;
+
+    // Simple undo: reload from source and replay all non-undone actions
+    // For simplicity, we'll just alert - full undo would need deep copies
+    alert('復原功能: 建議重新載入 JSON 檔案重新編輯。\n(完整 undo 尚未實作)');
+}
+
+// ══════════════════════════════════════════════
+// Drawing
+// ══════════════════════════════════════════════
+function redraw() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#2c3e50';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (!img.src || !img.complete) return;
+
+    // Draw image
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(zoom, zoom);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+
+    if (!sourceData) return;
+
+    // Draw all vertebrae contours
+    sourceData.vertebrae.forEach((v, i) => {
+        const isSelected = (i === selectedVertebra);
+        drawVertebraContour(v, isSelected);
+    });
+}
+
+function drawVertebraContour(v, isSelected) {
+    const supPts = v.superiorEndplate || [];
+    const infPts = v.inferiorEndplate || [];
+
+    ctx.save();
+    ctx.translate(panX, panY);
+    ctx.scale(zoom, zoom);
+
+    const pointRadius = Math.max(1.5, 3 / zoom);
+
+    // Highlight selected vertebra region
+    if (isSelected && (supPts.length > 0 || infPts.length > 0)) {
+        // Draw a subtle background highlight
+        const allPts = [...supPts, ...infPts];
+        if (allPts.length > 2) {
+            ctx.beginPath();
+            ctx.moveTo(allPts[0].x, allPts[0].y);
+            for (let i = 1; i < allPts.length; i++) {
+                ctx.lineTo(allPts[i].x, allPts[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(255, 255, 0, 0.08)';
+            ctx.fill();
+        }
+    }
+
+    // Draw superior endplate
+    if (supPts.length > 0) {
+        // Line
+        ctx.beginPath();
+        ctx.moveTo(supPts[0].x, supPts[0].y);
+        for (let i = 1; i < supPts.length; i++) {
+            ctx.lineTo(supPts[i].x, supPts[i].y);
+        }
+        ctx.strokeStyle = isSelected ? '#ff6b6b' : 'rgba(231, 76, 60, 0.5)';
+        ctx.lineWidth = isSelected ? 2 / zoom : 1 / zoom;
+        ctx.stroke();
+
+        // Points
+        if (isSelected) {
+            supPts.forEach(pt => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, pointRadius, 0, Math.PI * 2);
+                ctx.fillStyle = '#e74c3c';
+                ctx.fill();
+            });
+        }
+    }
+
+    // Draw inferior endplate
+    if (infPts.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(infPts[0].x, infPts[0].y);
+        for (let i = 1; i < infPts.length; i++) {
+            ctx.lineTo(infPts[i].x, infPts[i].y);
+        }
+        ctx.strokeStyle = isSelected ? '#3498db' : 'rgba(52, 152, 219, 0.5)';
+        ctx.lineWidth = isSelected ? 2 / zoom : 1 / zoom;
+        ctx.stroke();
+
+        if (isSelected) {
+            infPts.forEach(pt => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, pointRadius, 0, Math.PI * 2);
+                ctx.fillStyle = '#3498db';
+                ctx.fill();
+            });
+        }
+    }
+
+    // Label
+    const labelPts = supPts.length > 0 ? supPts : infPts;
+    if (labelPts.length > 0) {
+        const mid = labelPts[Math.floor(labelPts.length / 2)];
+        ctx.font = `bold ${Math.max(10, 14 / zoom)}px Arial`;
+        ctx.fillStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.7)';
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.lineWidth = 3 / zoom;
+        ctx.strokeText(v.name, mid.x - 10, mid.y - 10 / zoom);
+        ctx.fillText(v.name, mid.x - 10, mid.y - 10 / zoom);
+    }
+
+    ctx.restore();
+}
+
+function resetZoom() {
+    if (!img.src) return;
+    const scaleX = canvas.width / img.width;
+    const scaleY = canvas.height / img.height;
+    zoom = Math.min(scaleX, scaleY) * 0.95;
+    panX = (canvas.width - img.width * zoom) / 2;
+    panY = (canvas.height - img.height * zoom) / 2;
+    document.getElementById('zoomInfo').textContent = Math.round(zoom * 100) + '%';
+    redraw();
+}
+
+// ══════════════════════════════════════════════
+// Export
+// ══════════════════════════════════════════════
+function sample3Points(pts) {
+    /**
+     * 從一組終板輪廓點中取 3 個代表點:
+     * anterior (第一個), middle (中間), posterior (最後一個)
+     *
+     * pts 已按 X 排序 (left → right)
+     */
+    if (!pts || pts.length === 0) return null;
+    if (pts.length === 1) return { ant: pts[0], mid: pts[0], post: pts[0] };
+    if (pts.length === 2) {
+        const mid = {
+            x: (pts[0].x + pts[1].x) / 2,
+            y: (pts[0].y + pts[1].y) / 2
+        };
+        return { ant: pts[0], mid, post: pts[1] };
+    }
+
+    // Use cumulative arc-length to find the true midpoint
+    let cumLen = [0];
+    for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i-1].x;
+        const dy = pts[i].y - pts[i-1].y;
+        cumLen.push(cumLen[i-1] + Math.sqrt(dx*dx + dy*dy));
+    }
+    const totalLen = cumLen[cumLen.length - 1];
+    const halfLen = totalLen / 2;
+
+    // Find the point closest to half arc-length
+    let midIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < cumLen.length; i++) {
+        const diff = Math.abs(cumLen[i] - halfLen);
+        if (diff < minDiff) {
+            minDiff = diff;
+            midIdx = i;
+        }
+    }
+
+    return {
+        ant: pts[0],
+        mid: pts[midIdx],
+        post: pts[pts.length - 1]
+    };
+}
+
+function buildExportJSON() {
+    if (!sourceData) return null;
+
+    const spineType = sourceData.spineType;
+    const imgInfo = sourceData.imageInfo;
+    const vertebrae = [];
+
+    sourceData.vertebrae.forEach(v => {
+        const bt = v.boundaryType;
+        const supPts = v.superiorEndplate || [];
+        const infPts = v.inferiorEndplate || [];
+
+        // Skip vertebrae with no points
+        if (supPts.length === 0 && infPts.length === 0) return;
+
+        const entry = {
+            name: v.name,
+            boundaryType: bt || null,
+            hasMiddlePoints: true,  // we always output 3 points with middle
+            points: {}
+        };
+
+        if (bt === 'upper') {
+            // S1/T1: only superior endplate
+            const s3 = sample3Points(supPts);
+            if (!s3) return;
+            entry.points = {
+                anteriorSuperior: s3.ant,
+                middleSuperior: s3.mid,
+                posteriorSuperior: s3.post
+            };
+        } else if (bt === 'lower') {
+            // T12/C2: only inferior endplate
+            const i3 = sample3Points(infPts);
+            if (!i3) return;
+            entry.points = {
+                anteriorInferior: i3.ant,
+                middleInferior: i3.mid,
+                posteriorInferior: i3.post
+            };
+        } else {
+            // Full vertebra: both endplates
+            const s3 = sample3Points(supPts);
+            const i3 = sample3Points(infPts);
+            if (!s3 || !i3) return;
+
+            entry.points = {
+                anteriorSuperior: s3.ant,
+                middleSuperior: s3.mid,
+                posteriorSuperior: s3.post,
+                posteriorInferior: i3.post,
+                middleInferior: i3.mid,
+                anteriorInferior: i3.ant
+            };
+
+            // Calculate heights
+            const antH = Math.sqrt(
+                (i3.ant.x - s3.ant.x)**2 + (i3.ant.y - s3.ant.y)**2);
+            const midH = Math.sqrt(
+                (i3.mid.x - s3.mid.x)**2 + (i3.mid.y - s3.mid.y)**2);
+            const postH = Math.sqrt(
+                (i3.post.x - s3.post.x)**2 + (i3.post.y - s3.post.y)**2);
+
+            entry.anteriorHeight = antH;
+            entry.middleHeight = midH;
+            entry.posteriorHeight = postH;
+            entry.anteriorWedgingFracture = antH < postH * 0.75;
+            entry.crushDeformityFracture = antH > postH * 1.25;
+            entry.biconcaveCompressionFracture =
+                midH < (antH + postH) / 2 * 0.75;
+        }
+
+        vertebrae.push(entry);
+    });
+
+    // Calculate disc metrics
+    const discs = [];
+    for (let i = 0; i < vertebrae.length - 1; i++) {
+        const upper = vertebrae[i];
+        const lower = vertebrae[i + 1];
+
+        // Upper needs inferior endplate, lower needs superior endplate
+        const upperHasInf = upper.boundaryType !== 'upper';
+        const lowerHasSup = lower.boundaryType !== 'lower';
+        if (!upperHasInf || !lowerHasSup) continue;
+
+        const uAI = upper.points.anteriorInferior;
+        const uMI = upper.points.middleInferior;
+        const uPI = upper.points.posteriorInferior;
+        const lAS = lower.points.anteriorSuperior;
+        const lMS = lower.points.middleSuperior;
+        const lPS = lower.points.posteriorSuperior;
+
+        if (!uAI || !uPI || !lAS || !lPS) continue;
+
+        const antH = Math.sqrt((lAS.x - uAI.x)**2 + (lAS.y - uAI.y)**2);
+        const postH = Math.sqrt((lPS.x - uPI.x)**2 + (lPS.y - uPI.y)**2);
+        let midH = (antH + postH) / 2;
+        if (uMI && lMS) {
+            midH = Math.sqrt((lMS.x - uMI.x)**2 + (lMS.y - uMI.y)**2);
+        }
+
+        const upperAngle = Math.atan2(uPI.y - uAI.y, uPI.x - uAI.x);
+        const lowerAngle = Math.atan2(lPS.y - lAS.y, lPS.x - lAS.x);
+        let wedgeAngle = Math.abs(upperAngle - lowerAngle) * 180 / Math.PI;
+        if (wedgeAngle > 90) wedgeAngle = 180 - wedgeAngle;
+
+        discs.push({
+            level: upper.name + '/' + lower.name,
+            upperEndplate: [uAI, uMI, uPI].filter(Boolean),
+            lowerEndplate: [lAS, lMS, lPS].filter(Boolean),
+            anteriorHeight: antH,
+            posteriorHeight: postH,
+            middleHeight: midH,
+            wedgeAngle: wedgeAngle,
+            overlap: antH < 0 || postH < 0
+        });
+    }
+
+    // Abnormalities
+    const abnormalities = {
+        compressionFractures: [],
+        biconcaveCompression: [],
+        listhesis: [],
+        discOverlap: [],
+        heightProgressionIssues: []
+    };
+
+    vertebrae.forEach(v => {
+        if (v.anteriorWedgingFracture) {
+            abnormalities.compressionFractures.push({
+                name: v.name, type: 'anteriorWedging'
+            });
+        }
+        if (v.biconcaveCompressionFracture) {
+            abnormalities.biconcaveCompression.push({ name: v.name });
+        }
+    });
+
+    return {
+        version: '2.3',
+        exportDate: new Date().toISOString(),
+        spineType: spineType,
+        endplatePointMode: 3,
+        imageInfo: imgInfo,
+        convertedFrom: 'pkl-contour-editor',
+        sourcePkl: sourceData.sourcePkl || '',
+        vertebrae: vertebrae,
+        discs: discs,
+        abnormalities: abnormalities
+    };
+}
+
+function exportJSON() {
+    const data = buildExportJSON();
+    if (!data) { alert('No data to export'); return; }
+
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    const baseName = (sourceData.sourcePkl || 'converted').replace('.pkl', '');
+    a.download = baseName + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportToAnnotationTool() {
+    const data = buildExportJSON();
+    if (!data) { alert('No data to export'); return; }
+
+    // Store in sessionStorage for the annotation tool to pick up
+    data.result_image = sourceData.imageBase64;
+    sessionStorage.setItem('inferenceResult', JSON.stringify(data));
+
+    // Open annotation tool
+    const annotationUrl = 'spinal-annotation-web.html?import=inference';
+    window.open(annotationUrl, '_blank');
+}
+
+// ══════════════════════════════════════════════
+// Window resize
+// ══════════════════════════════════════════════
+window.addEventListener('resize', () => {
+    if (!img.src) return;
+    const container = document.getElementById('canvasContainer');
+    canvas.width = container.clientWidth;
+    canvas.height = container.clientHeight;
+    redraw();
+});
+</script>
+</body>
+</html>
