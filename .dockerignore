@@ -1,0 +1,34 @@
+# 不需要放進 Docker image 的檔案
+Images/
+endplate_training_data/
+inference_results/
+__pycache__/
+*.pyc
+
+# 訓練相關 (NAS 只做推理)
+*.pth
+checkpoint_*.pth
+training_loss_curve.png
+
+# 測試檔案
+test_*.py
+quick_test.py
+diagnose_data.py
+check_dicom.py
+validate_*.py
+
+# 文件
+*.md
+*.bat
+
+# Git
+.git/
+.gitignore
+
+# 舊版檔案
+train_endplate_model.py
+inference.py
+api_server.py
+slicer_*.py
+preprocess_*.py
+prepare_*.py
