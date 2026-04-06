@@ -29,6 +29,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 from train_vertebra_model import VertebraCornerModel, HEATMAP_SIZE
+from spine_metrics import calculate_metrics, calculate_discs
 
 
 # 椎體名稱對照表
@@ -389,75 +390,12 @@ class VertebraInference:
         return vertebrae, combined_heatmap, heatmaps
 
     def _calculate_metrics(self, vertebra):
-        pts = vertebra['points']
-        bt = vertebra['boundaryType']
-
-        if bt:
-            vertebra['anteriorHeight'] = None
-            vertebra['posteriorHeight'] = None
-            vertebra['heightRatio'] = None
-            vertebra['anteriorWedgingFracture'] = False
-            vertebra['crushDeformityFracture'] = False
-            return
-
-        ant_sup = pts.get('anteriorSuperior')
-        ant_inf = pts.get('anteriorInferior')
-        post_sup = pts.get('posteriorSuperior')
-        post_inf = pts.get('posteriorInferior')
-
-        if not all([ant_sup, ant_inf, post_sup, post_inf]):
-            vertebra['anteriorHeight'] = None
-            vertebra['posteriorHeight'] = None
-            vertebra['heightRatio'] = None
-            vertebra['anteriorWedgingFracture'] = False
-            vertebra['crushDeformityFracture'] = False
-            return
-
-        ant_h = np.sqrt((ant_inf['x'] - ant_sup['x'])**2 + (ant_inf['y'] - ant_sup['y'])**2)
-        post_h = np.sqrt((post_inf['x'] - post_sup['x'])**2 + (post_inf['y'] - post_sup['y'])**2)
-
-        ratio = ant_h / post_h if post_h > 0 else 0
-
-        vertebra['anteriorHeight'] = float(ant_h)
-        vertebra['posteriorHeight'] = float(post_h)
-        vertebra['heightRatio'] = float(ratio)
-        vertebra['anteriorWedgingFracture'] = bool(ratio < 0.75)
-        vertebra['crushDeformityFracture'] = bool(ratio > 1.25)
+        """委託給 spine_metrics 共用模組 (Genant classification)"""
+        calculate_metrics(vertebra)
 
     def _calculate_discs(self, vertebrae, spine_type):
-        discs = []
-
-        for i in range(len(vertebrae) - 1):
-            upper = vertebrae[i]
-            lower = vertebrae[i + 1]
-
-            if upper.get('boundaryType') == 'upper':
-                continue
-            if lower.get('boundaryType') == 'lower':
-                continue
-
-            upper_pts = upper['points']
-            lower_pts = lower['points']
-
-            u_ant_inf = upper_pts.get('anteriorInferior')
-            u_post_inf = upper_pts.get('posteriorInferior')
-            l_ant_sup = lower_pts.get('anteriorSuperior')
-            l_post_sup = lower_pts.get('posteriorSuperior')
-
-            if not all([u_ant_inf, u_post_inf, l_ant_sup, l_post_sup]):
-                continue
-
-            ant_h = np.sqrt((l_ant_sup['x'] - u_ant_inf['x'])**2 + (l_ant_sup['y'] - u_ant_inf['y'])**2)
-            post_h = np.sqrt((l_post_sup['x'] - u_post_inf['x'])**2 + (l_post_sup['y'] - u_post_inf['y'])**2)
-
-            discs.append({
-                'level': f"{upper['name']}/{lower['name']}",
-                'anteriorHeight': float(ant_h),
-                'posteriorHeight': float(post_h),
-                'middleHeight': float((ant_h + post_h) / 2),
-            })
-
-        return discs
+        """委託給 spine_metrics 共用模組"""
+        return calculate_discs(vertebrae, spine_type)
 
     def visualize(self, result, output_path=None, show=False):
         """視覺化預測結果"""
