@@ -830,12 +830,26 @@ class VertebraDataPreparer:
 
         print("\n✅ 創建數據集資訊檔案")
 
-    def process_all(self):
-        """處理所有數據"""
-        print("🚀 開始椎體頂點檢測數據準備流程 V2...")
+    def process_all(self, spine_type_filter=None):
+        """處理所有數據
+
+        Args:
+            spine_type_filter: 'L', 'C', or None (all)
+        """
+        filter_msg = f" (filter: {spine_type_filter}-spine only)" if spine_type_filter else ""
+        print(f"開始椎體頂點檢測數據準備流程 V2{filter_msg}...")
 
         # 1. 收集標註檔案
         annotations = self.collect_annotations()
+
+        # 過濾脊椎類型
+        if spine_type_filter:
+            before = len(annotations)
+            annotations = [
+                a for a in annotations
+                if a['data'].get('spineType', a['data'].get('spine_type', 'L')) == spine_type_filter
+            ]
+            print(f"  Filtered: {before} -> {len(annotations)} ({spine_type_filter}-spine)")
 
         if not annotations:
             print("❌ 未找到有效的標註檔案")
@@ -865,11 +879,13 @@ def main():
                        help='標註檔案目錄（預設為當前目錄）')
     parser.add_argument('--output_dir', type=str, default='endplate_training_data',
                        help='輸出目錄')
+    parser.add_argument('--spine-type', type=str, default=None, choices=['L', 'C'],
+                       help='只處理特定脊椎類型 (L=lumbar, C=cervical)')
 
     args = parser.parse_args()
 
     preparer = VertebraDataPreparer(args.input_dir, args.output_dir)
-    preparer.process_all()
+    preparer.process_all(spine_type_filter=args.spine_type)
 
 if __name__ == "__main__":
     main()
