@@ -1,0 +1,3 @@
+[submodule "spinefm"]
+	path = spinefm
+	url = https://github.com/sjsimons/SpineFM.git

@@ -400,10 +400,12 @@
                         <button class="btn-primary" onclick="loadImage()">📂 載入影像</button>
                         <button class="btn-primary" onclick="pasteImage()">📋 貼上 (Ctrl+V)</button>
                         <button class="btn-secondary" onclick="document.getElementById('jsonInput').click()" style="font-size:13px;">📥 匯入 JSON</button>
+                        <button class="btn-primary" onclick="loadSpineFM()" style="font-size:13px; background: linear-gradient(135deg, #e67e22, #d35400);">🤖 載入 SpineFM</button>
                     </div>
                     <div class="toolbar-group">
                         <button class="btn-warning" onclick="undoPoint()">↶ 撤銷點</button>
                         <button class="btn-danger" onclick="deleteCurrentVertebra()">🗑️ 刪除椎體</button>
+                        <button class="btn-danger" id="btnDeleteSelected" onclick="deleteSelectedVertebrae()" style="display:none;">🗑️ 刪除選取 (<span id="selectedCount">0</span>)</button>
                         <button class="btn-secondary" onclick="clearAll()">清除全部</button>
                         <button class="btn-success" id="btnFinishEarly" onclick="finishEarly()" style="display:none;">✅ 結束標註</button>
                     </div>
@@ -485,6 +487,7 @@
 
     <input type="file" id="fileInput" accept="image/*" style="display: none;" onchange="handleFileSelect(event)">
     <input type="file" id="jsonInput" accept=".json" style="display: none;" onchange="handleJsonImport(event)">
+    <input type="file" id="spinefmInput" accept=".json,image/*" multiple style="display: none;" onchange="handleSpineFMSelect(event)">
 
     <script>
         // ==================== 配置 ====================
@@ -656,6 +659,11 @@
                     processedImage = null;
                     redraw();
                     updateUI();
+
+                    // 自動套用暫存的 SpineFM 資料
+                    if (window._pendingSpineFM) {
+                        _applySpineFMData(window._pendingSpineFM);
+                    }
                 };
                 img.src = e.target.result;
             };
@@ -719,12 +727,16 @@
             redraw();
         }
 
-        // ── 角點拖曳狀態 ──
-        let dragInfo = null;  // {vertebraIdx, pointIdx} 正在拖曳的角點
+        // ── 拖曳 & 選取狀態 ──
+        let dragInfo = null;       // {vertebraIdx, pointIdx} 正在拖曳的單一角點
+        let groupDrag = null;      // {lastImgX, lastImgY} 群組移動的上一幀座標
         let _justDragged = false;  // 防止拖曳結束後觸發 click
 
+        // ── 框選狀態 ──
+        let selectBox = null;      // {startX, startY, endX, endY} 影像座標
+        let selectedVertebrae = new Set();  // 被框選/點選的椎體 index
+
         function _canvasToImage(e) {
-            // 將滑鼠座標轉為影像座標
             const rect = canvas.getBoundingClientRect();
             const cssToCanvasX = canvas.width / rect.width;
             const cssToCanvasY = canvas.height / rect.height;
@@ -736,7 +748,6 @@
         }
 
         function _findNearestPoint(imgX, imgY, threshold) {
-            // 在所有已標註椎體中找最近的角點
             const th2 = threshold * threshold;
             let best = null;
             let bestDist = Infinity;
@@ -755,19 +766,87 @@
             return best;
         }
 
+        function _findHitVertebra(imgX, imgY) {
+            // 找點擊位置落在哪個椎體的多邊形內（用於群組拖曳）
+            for (let vi = 0; vi < vertebrae.length; vi++) {
+                const pts = vertebrae[vi].points;
+                if (pts.length < 3) continue;
+                if (_pointInPolygon(imgX, imgY, pts)) return vi;
+            }
+            return -1;
+        }
+
+        function _pointInPolygon(x, y, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                const xi = polygon[i].x, yi = polygon[i].y;
+                const xj = polygon[j].x, yj = polygon[j].y;
+                if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+                    inside = !inside;
+                }
+            }
+            return inside;
+        }
+
         function handleMouseDown(e) {
             if (e.button === 1 || e.button === 2) {
-                // 中/右鍵: 平移
                 isDragging = true;
                 lastMousePos = {x: e.clientX, y: e.clientY};
                 e.preventDefault();
                 return;
             }
 
-            if (e.button === 0 && vertebrae.length > 0) {
-                // 左鍵: 檢查是否在已有角點附近 → 開始拖曳
-                const {imgX, imgY} = _canvasToImage(e);
-                const hitRadius = 12 / zoom;  // 12px 容差 (考慮縮放)
+            if (e.button !== 0) return;
+            const {imgX, imgY} = _canvasToImage(e);
+            const hitRadius = 12 / zoom;
+
+            // ── Shift + 左鍵: 框選 ──
+            if (e.shiftKey && vertebrae.length > 0) {
+                selectBox = {startX: imgX, startY: imgY, endX: imgX, endY: imgY};
+                e.preventDefault();
+                canvas.style.cursor = 'crosshair';
+                return;
+            }
+
+            // ── 有選取的椎體時: 判斷群組移動 vs 單點拖曳 ──
+            if (selectedVertebrae.size > 0) {
+                const hit = _findNearestPoint(imgX, imgY, hitRadius);
+
+                // 點擊到已選取椎體的角點 → 單點拖曳（精細調整）
+                if (hit && selectedVertebrae.has(hit.vertebraIdx)) {
+                    dragInfo = hit;
+                    e.preventDefault();
+                    canvas.style.cursor = 'grabbing';
+                    return;
+                }
+
+                // 點擊到已選取椎體的多邊形內 → 群組移動
+                const hitVi = _findHitVertebra(imgX, imgY);
+                if (hitVi >= 0 && selectedVertebrae.has(hitVi)) {
+                    groupDrag = {lastImgX: imgX, lastImgY: imgY};
+                    e.preventDefault();
+                    canvas.style.cursor = 'move';
+                    return;
+                }
+
+                // 點擊到未選取的角點 → 清除選取，開始單點拖曳
+                if (hit) {
+                    selectedVertebrae.clear();
+                    dragInfo = hit;
+                    e.preventDefault();
+                    canvas.style.cursor = 'grabbing';
+                    return;
+                }
+
+                // 點擊空白處 → 清除選取
+                selectedVertebrae.clear();
+                redraw();
+                updateUI();
+                return;
+            }
+
+            // ── 無選取: 單點拖曳 ──
+            if (vertebrae.length > 0) {
                 const hit = _findNearestPoint(imgX, imgY, hitRadius);
                 if (hit) {
                     dragInfo = hit;
@@ -779,8 +858,34 @@
         }
 
         function handleMouseMove(e) {
+            // ── 框選 ──
+            if (selectBox) {
+                const {imgX, imgY} = _canvasToImage(e);
+                selectBox.endX = imgX;
+                selectBox.endY = imgY;
+                redraw();
+                return;
+            }
+
+            // ── 群組移動 ──
+            if (groupDrag) {
+                const {imgX, imgY} = _canvasToImage(e);
+                const dx = imgX - groupDrag.lastImgX;
+                const dy = imgY - groupDrag.lastImgY;
+                for (const vi of selectedVertebrae) {
+                    for (const pt of vertebrae[vi].points) {
+                        pt.x += dx;
+                        pt.y += dy;
+                    }
+                }
+                groupDrag.lastImgX = imgX;
+                groupDrag.lastImgY = imgY;
+                redraw();
+                return;
+            }
+
+            // ── 單點拖曳 ──
             if (dragInfo) {
-                // 拖曳角點
                 const {imgX, imgY} = _canvasToImage(e);
                 const pt = vertebrae[dragInfo.vertebraIdx].points[dragInfo.pointIdx];
                 pt.x = imgX;
@@ -789,6 +894,7 @@
                 return;
             }
 
+            // ── 平移 ──
             if (isDragging) {
                 const rect = canvas.getBoundingClientRect();
                 const cssToCanvasX = canvas.width / rect.width;
@@ -801,27 +907,106 @@
                 return;
             }
 
-            // 滑鼠懸停: 靠近角點時改變游標
+            // ── 懸停游標 ──
             if (vertebrae.length > 0) {
                 const {imgX, imgY} = _canvasToImage(e);
                 const hitRadius = 12 / zoom;
                 const hit = _findNearestPoint(imgX, imgY, hitRadius);
-                canvas.style.cursor = hit ? 'grab' : 'crosshair';
+
+                if (e.shiftKey) {
+                    canvas.style.cursor = 'crosshair';
+                } else if (selectedVertebrae.size > 0) {
+                    const hitVi = hit ? hit.vertebraIdx : _findHitVertebra(imgX, imgY);
+                    if (hitVi >= 0 && selectedVertebrae.has(hitVi)) {
+                        canvas.style.cursor = hit ? 'grab' : 'move';
+                    } else {
+                        canvas.style.cursor = hit ? 'grab' : 'default';
+                    }
+                } else {
+                    canvas.style.cursor = hit ? 'grab' : 'crosshair';
+                }
             }
         }
 
         function handleMouseUp(e) {
+            // ── 框選結束 ──
+            if (selectBox) {
+                _finishBoxSelect();
+                selectBox = null;
+                _justDragged = true;
+                redraw();
+                updateUI();
+                return;
+            }
+
+            // ── 群組移動結束 ──
+            if (groupDrag) {
+                for (const vi of selectedVertebrae) {
+                    calculateVertebraMetrics(vi);
+                }
+                groupDrag = null;
+                _justDragged = true;
+                canvas.style.cursor = 'move';
+                updateUI();
+                return;
+            }
+
+            // ── 單點拖曳結束 ──
             if (dragInfo) {
-                // 拖曳結束: 重新計算該椎體的指標
                 calculateVertebraMetrics(dragInfo.vertebraIdx);
                 updateUI();
                 dragInfo = null;
-                _justDragged = true;  // 防止接下來的 click 事件新增點
+                _justDragged = true;
                 canvas.style.cursor = 'crosshair';
                 return;
             }
+
             isDragging = false;
-            // wasDragging 由 contextmenu handler 重置，不在此重置
+        }
+
+        function _finishBoxSelect() {
+            const x1 = Math.min(selectBox.startX, selectBox.endX);
+            const y1 = Math.min(selectBox.startY, selectBox.endY);
+            const x2 = Math.max(selectBox.startX, selectBox.endX);
+            const y2 = Math.max(selectBox.startY, selectBox.endY);
+
+            if (Math.abs(x2 - x1) < 5 && Math.abs(y2 - y1) < 5) return;
+
+            selectedVertebrae.clear();
+            for (let i = 0; i < vertebrae.length; i++) {
+                const v = vertebrae[i];
+                const cx = v.points.reduce((s, p) => s + p.x, 0) / v.points.length;
+                const cy = v.points.reduce((s, p) => s + p.y, 0) / v.points.length;
+                if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
+                    selectedVertebrae.add(i);
+                }
+            }
+        }
+
+        // 切換單個椎體的選取狀態（從 sidebar 呼叫）
+        function toggleSelectVertebra(idx) {
+            if (selectedVertebrae.has(idx)) {
+                selectedVertebrae.delete(idx);
+            } else {
+                selectedVertebrae.add(idx);
+            }
+            redraw();
+            updateUI();
+        }
+
+        function deleteSelectedVertebrae() {
+            if (selectedVertebrae.size === 0) return;
+            const names = [...selectedVertebrae].map(i => vertebrae[i].name).join(', ');
+            if (!confirm(`刪除 ${selectedVertebrae.size} 個椎體？\n${names}`)) return;
+
+            const sorted = [...selectedVertebrae].sort((a, b) => b - a);
+            for (const idx of sorted) {
+                vertebrae.splice(idx, 1);
+            }
+            selectedVertebrae.clear();
+            annotationFinished = false;
+            redraw();
+            updateUI();
         }
 
         function zoomIn() { zoom = Math.min(5, zoom * 1.2); document.getElementById('zoomLevel').textContent = Math.round(zoom * 100); redraw(); }
@@ -871,6 +1056,9 @@
         function handleCanvasClick(event) {
             if (!originalImage || isDragging || _justDragged) { _justDragged = false; return; }
 
+            // Shift 鍵保留給框選，不新增點
+            if (event.shiftKey) return;
+
             const rect = canvas.getBoundingClientRect();
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
@@ -882,9 +1070,13 @@
 
             if (x < 0 || x > originalImage.width || y < 0 || y > originalImage.height) return;
 
+            // 如果點擊的是已有角點（拖曳起始），不新增點
+            const hitRadius = 12 / zoom;
+            if (_findNearestPoint(x, y, hitRadius)) return;
+
             const nextName = getNextVertebraName();
             if (!nextName) {
-                alert('已達到最大椎體數量');
+                // 已完成標註: 不顯示提示，安靜忽略
                 return;
             }
 
@@ -1042,6 +1234,17 @@
             if (e.ctrlKey && e.key === 'z') {
                 e.preventDefault();
                 undoPoint();
+            }
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedVertebrae.size > 0) {
+                e.preventDefault();
+                deleteSelectedVertebrae();
+            }
+            // Escape 取消框選
+            if (e.key === 'Escape' && (selectBox || selectedVertebrae.size > 0)) {
+                selectBox = null;
+                selectedVertebrae.clear();
+                redraw();
+                updateUI();
             }
         }
 
@@ -1229,8 +1432,163 @@
             redraw();
             updateUI();
 
-            const src = data.source === 'ai-inference' ? ' (AI 推理結果)' : '';
-            alert(`成功匯入 ${vertebrae.length} 個椎體${src}\n\n可拖曳角點進行修正，完成後匯出 JSON`);
+            const src = data.source === 'ai-inference' ? ' (AI 推理結果)'
+                       : data.source === 'spinefm' ? '' // SpineFM 有自己的 alert
+                       : (data.backend === 'SpineFM' ? '' : '');
+            if (data.source !== 'spinefm') {
+                alert(`成功匯入 ${vertebrae.length} 個椎體${src}\n\n可拖曳角點進行修正，完成後匯出 JSON`);
+            }
+        }
+
+        // ==================== 載入 SpineFM 結果 ====================
+        function loadSpineFM() {
+            document.getElementById('spinefmInput').click();
+        }
+
+        function handleSpineFMSelect(event) {
+            const files = Array.from(event.target.files);
+            event.target.value = '';
+
+            if (files.length === 0) return;
+
+            // 分類檔案
+            let jsonFile = null;
+            let imageFile = null;
+
+            for (const f of files) {
+                if (f.name.endsWith('.json')) {
+                    jsonFile = f;
+                } else if (/\.(png|jpg|jpeg|bmp|tif|tiff)$/i.test(f.name)) {
+                    imageFile = f;
+                }
+            }
+
+            // 只選了 JSON → 載入 JSON，提示使用者之後載入影像
+            if (jsonFile && !imageFile) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        if (!data.vertebrae || data.vertebrae.length === 0) {
+                            alert('SpineFM JSON 中沒有椎體資料。\n請確認 SpineFM 推論已成功執行。');
+                            return;
+                        }
+                        // 儲存 JSON 資料，等影像載入後匯入
+                        window._pendingSpineFM = data;
+                        window._spinefmJsonName = jsonFile.name;
+
+                        // 推測影像檔名: xxx.spinefm.json → xxx.png
+                        const baseName = jsonFile.name.replace(/\.spinefm\.json$/i, '').replace(/\.json$/i, '');
+                        alert(
+                            `已讀取 SpineFM 結果: ${data.vertebrae.length} 個椎體\n` +
+                            `(${jsonFile.name})\n\n` +
+                            `請再選取對應的原始影像 (${baseName}.png)\n` +
+                            `或先用「載入影像」載入影像後，再按「載入 SpineFM」選取 JSON。`
+                        );
+
+                        // 如果已有影像，直接匯入
+                        if (originalImage) {
+                            _applySpineFMData(data);
+                        }
+                    } catch(err) {
+                        alert('JSON 解析失敗: ' + err.message);
+                    }
+                };
+                reader.readAsText(jsonFile);
+                return;
+            }
+
+            // 只選了影像 → 載入影像，然後套用暫存的 SpineFM
+            if (imageFile && !jsonFile) {
+                _loadImageFile(imageFile, function() {
+                    if (window._pendingSpineFM) {
+                        _applySpineFMData(window._pendingSpineFM);
+                    }
+                });
+                return;
+            }
+
+            // 同時選了影像 + JSON → 先載入影像，再匯入 JSON
+            if (imageFile && jsonFile) {
+                const jsonReader = new FileReader();
+                jsonReader.onload = function(je) {
+                    try {
+                        const data = JSON.parse(je.target.result);
+                        if (!data.vertebrae || data.vertebrae.length === 0) {
+                            alert('SpineFM JSON 中沒有椎體資料。');
+                            return;
+                        }
+                        _loadImageFile(imageFile, function() {
+                            _applySpineFMData(data);
+                        });
+                    } catch(err) {
+                        alert('JSON 解析失敗: ' + err.message);
+                    }
+                };
+                jsonReader.readAsText(jsonFile);
+                return;
+            }
+        }
+
+        function _loadImageFile(file, callback) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    originalImage = img;
+                    processedImage = null;
+                    contrastEnhanced = false;
+
+                    canvas.width = Math.min(img.width, 1200);
+                    canvas.height = Math.round(canvas.width * (img.height / img.width));
+                    zoom = canvas.width / img.width;
+                    panX = 0; panY = 0;
+
+                    redraw();
+                    updateUI();
+                    if (callback) callback();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function _applySpineFMData(data) {
+            window._pendingSpineFM = null;
+            const srcName = window._spinefmJsonName || 'SpineFM';
+            window._spinefmJsonName = null;
+
+            // 檢查影像尺寸是否匹配
+            if (data.imageInfo && originalImage) {
+                const jsonW = data.imageInfo.width;
+                const jsonH = data.imageInfo.height;
+                const imgW = originalImage.naturalWidth || originalImage.width;
+                const imgH = originalImage.naturalHeight || originalImage.height;
+                if (jsonW !== imgW || jsonH !== imgH) {
+                    const proceed = confirm(
+                        `影像尺寸不匹配:\n` +
+                        `  JSON: ${jsonW} x ${jsonH}\n` +
+                        `  影像: ${imgW} x ${imgH}\n\n` +
+                        `角點座標可能需要縮放。是否仍要匯入？`
+                    );
+                    if (!proceed) return;
+                }
+            }
+
+            // 透過既有的 importAnnotationJson 匯入
+            data.source = 'spinefm';
+            importAnnotationJson(data);
+
+            const count = data.vertebrae ? data.vertebrae.length : 0;
+            const hasFracture = (data.vertebrae || []).some(v => v.genantGrade > 0);
+            let msg = `SpineFM 結果已載入: ${count} 個椎體\n`;
+            if (hasFracture) {
+                const fxList = data.vertebrae.filter(v => v.genantGrade > 0)
+                    .map(v => `${v.name}: Grade ${v.genantGrade} (${v.genantType})`);
+                msg += `\n偵測到骨折:\n${fxList.join('\n')}\n`;
+            }
+            msg += '\n請檢查角點位置，拖曳修正後匯出 JSON。';
+            alert(msg);
         }
 
         // 自動從 sessionStorage 載入推理結果 (從 inference web 跳轉)
@@ -1273,10 +1631,25 @@
 
             // 繪製已完成的椎體
             vertebrae.forEach((v, idx) => {
+                const isSelected = selectedVertebrae.has(idx);
                 const isAbnormal = !v.boundaryType && (checkVertebraAbnormal(v) || checkBiconcaveCompression(v));
-                const color = v.boundaryType ? COLORS.boundaryVertebra :
+                const color = isSelected ? '#ff2222' :
+                              v.boundaryType ? COLORS.boundaryVertebra :
                               isAbnormal ? COLORS.abnormalVertebra : COLORS.completedVertebra;
                 drawVertebra(v, color, idx);
+                // 選取高亮: 粗外框
+                if (isSelected) {
+                    const pts = v.points;
+                    ctx.strokeStyle = '#ff2222';
+                    ctx.lineWidth = 4 / zoom;
+                    ctx.setLineDash([6 / zoom, 4 / zoom]);
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0].x, pts[0].y);
+                    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+                    ctx.closePath();
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
             });
 
             // 繪製當前點
@@ -1293,6 +1666,21 @@
             if (currentPoints.length === reqPts - 1 && reqPts === endplatePointMode * 2) {
                 ctx.setLineDash([5, 5]);
                 drawLine(currentPoints[currentPoints.length - 1], currentPoints[0], '#ffffff', 1);
+                ctx.setLineDash([]);
+            }
+
+            // 框選矩形
+            if (selectBox) {
+                const x = Math.min(selectBox.startX, selectBox.endX);
+                const y = Math.min(selectBox.startY, selectBox.endY);
+                const w = Math.abs(selectBox.endX - selectBox.startX);
+                const h = Math.abs(selectBox.endY - selectBox.startY);
+                ctx.fillStyle = 'rgba(255, 50, 50, 0.12)';
+                ctx.fillRect(x, y, w, h);
+                ctx.strokeStyle = '#ff3333';
+                ctx.lineWidth = 2 / zoom;
+                ctx.setLineDash([6 / zoom, 4 / zoom]);
+                ctx.strokeRect(x, y, w, h);
                 ctx.setLineDash([]);
             }
 
@@ -1437,18 +1825,18 @@
 
         // ==================== 分析計算 ====================
         function checkVertebraAbnormal(v) {
-            // 回傳異常類型: false / 'anteriorWedging' / 'crushDeformity'
+            // Genant semi-quantitative: threshold 0.8
             if (!v.anteriorHeight || !v.posteriorHeight) return false;
-            if (v.anteriorHeight < v.posteriorHeight * 0.75) return 'anteriorWedging';
-            if (v.anteriorHeight > v.posteriorHeight * 1.25) return 'crushDeformity';
+            if (v.anteriorHeight < v.posteriorHeight * 0.8) return 'anteriorWedging';
+            if (v.posteriorHeight < v.anteriorHeight * 0.8) return 'crushDeformity';
             return false;
         }
 
         function checkBiconcaveCompression(v) {
+            // Genant: middleHeight / posteriorHeight < 0.8
             if (!v.hasMiddlePoints) return false;
-            if (!v.middleHeight || !v.anteriorHeight || !v.posteriorHeight) return false;
-            const avgSide = (v.anteriorHeight + v.posteriorHeight) / 2;
-            return v.middleHeight < avgSide * 0.75;
+            if (!v.middleHeight || !v.posteriorHeight) return false;
+            return v.middleHeight < v.posteriorHeight * 0.8;
         }
 
         function getAnatomicalOrder() {
@@ -1516,60 +1904,42 @@
         }
 
         function checkListhesis() {
+            // 滑脫偵測: 比較相鄰椎體後緣 X 座標的位移
+            // 用相鄰兩椎體的後緣下角 vs 後緣上角的 X 差，
+            // 而非全域首尾連線（lordotic curve 會造成誤判）
             const results = [];
             const ordered = getAnatomicalOrder();
-            // 只取有後緣資訊的椎體
-            const withPosterior = ordered.filter(v => {
-                const p = getPosteriorPoints(v);
-                return p.top || p.bottom;
-            });
 
-            if (withPosterior.length < 3) return results;
+            for (let i = 0; i < ordered.length - 1; i++) {
+                const upper = ordered[i];
+                const lower = ordered[i + 1];
 
-            // 取後緣代表點：完整椎體用中點，邊界椎體用有的那個點
-            const posteriorPts = withPosterior.map(v => {
-                const p = getPosteriorPoints(v);
-                let x, y;
-                if (p.top && p.bottom) {
-                    x = (p.top.x + p.bottom.x) / 2;
-                    y = (p.top.y + p.bottom.y) / 2;
-                } else if (p.top) {
-                    x = p.top.x; y = p.top.y;
-                } else {
-                    x = p.bottom.x; y = p.bottom.y;
-                }
-                return { name: v.name, x, y, v };
-            });
+                // 取上椎體的後緣下角 (posteriorInferior)
+                const upperPost = getPosteriorPoints(upper);
+                // 取下椎體的後緣上角 (posteriorSuperior)
+                const lowerPost = getPosteriorPoints(lower);
 
-            const first = posteriorPts[0];
-            const last = posteriorPts[posteriorPts.length - 1];
-            const lineLen = Math.sqrt(Math.pow(last.x - first.x, 2) + Math.pow(last.y - first.y, 2));
-            if (lineLen === 0) return results;
+                if (!upperPost.bottom || !lowerPost.top) continue;
 
-            for (let i = 1; i < posteriorPts.length - 1; i++) {
-                const p = posteriorPts[i];
-                const distance = Math.abs(
-                    (last.y - first.y) * p.x - (last.x - first.x) * p.y +
-                    last.x * first.y - last.y * first.x
-                ) / lineLen;
+                const xShift = upperPost.bottom.x - lowerPost.top.x;
 
-                // 使用上終板寬度作為參考
-                const upper = getUpperEndplate(p.v);
-                if (!upper) continue;
-                const width = Math.abs(upper[2].x - upper[0].x);
+                // 用下椎體的整體寬度作為參考 (anterior 到 posterior 最大 X 跨度)
+                const lowerPts = lower.points;
+                const allX = lowerPts.map(p => p.x);
+                const width = Math.max(...allX) - Math.min(...allX);
                 if (width === 0) continue;
 
-                const shiftPercent = (distance / width) * 100;
+                const shiftPercent = Math.abs(xShift) / width * 100;
 
-                if (shiftPercent > 5) {
-                    const dy = last.y - first.y;
-                    const expectedX = dy !== 0 ?
-                        first.x + (p.y - first.y) * (last.x - first.x) / dy :
-                        first.x;
-                    const type = p.x > expectedX ? 'Retrolisthesis' : 'Anterolisthesis';
+                // 門檻: > 10% 才報告 (5% 在正常 lordosis 下常見)
+                if (shiftPercent > 10) {
+                    // lateral X-ray: posterior = 較大 X (右側)
+                    // xShift > 0: 上椎體後緣 X 較大 = 上椎體向後滑 → retrolisthesis
+                    // xShift < 0: 上椎體後緣 X 較小 = 上椎體向前滑 → anterolisthesis
+                    const type = xShift > 0 ? 'Retrolisthesis' : 'Anterolisthesis';
 
                     results.push({
-                        level: p.name,
+                        level: `${upper.name} on ${lower.name}`,
                         type: type,
                         shift: shiftPercent.toFixed(1)
                     });
@@ -1590,35 +1960,37 @@
                 discHeights.push({ level, height: metrics.middleHeight });
             }
 
-            if (discHeights.length < 2) return results;
+            if (discHeights.length < 3) return results;
 
             const config = CONFIG[spineType];
+            // 已報過的 level 不重複
+            const flagged = new Set();
 
             if (config.expectedHeightPattern === 'L4L5_highest') {
-                const l45 = discHeights.find(d => d.level === 'L4/L5');
+                // 策略: 找高度明顯偏低的椎間盤
+                // 比較每個椎間盤與相鄰椎間盤的高度
+                for (let i = 0; i < discHeights.length; i++) {
+                    const d = discHeights[i];
+                    if (d.level === 'L5/S1') continue; // L5/S1 本來就較窄
 
-                if (l45) {
-                    discHeights.forEach(d => {
-                        if (d.level !== 'L4/L5' && d.level !== 'L5/S1') {
-                            if (d.height > l45.height * 1.1) {
-                                results.push({
-                                    level: d.level,
-                                    issue: `椎間盤高度異常偏高（高於 L4/L5）`,
-                                    severity: 'warning'
-                                });
-                            }
-                        }
-                    });
-                }
+                    // 取相鄰椎間盤高度
+                    const neighbors = [];
+                    if (i > 0) neighbors.push(discHeights[i - 1].height);
+                    if (i < discHeights.length - 1 && discHeights[i + 1].level !== 'L5/S1') {
+                        neighbors.push(discHeights[i + 1].height);
+                    }
+                    if (neighbors.length === 0) continue;
 
-                for (let i = 0; i < discHeights.length - 1; i++) {
-                    if (discHeights[i + 1].level === 'L5/S1') continue;
-                    if (discHeights[i].height > discHeights[i + 1].height * 1.3) {
+                    const avgNeighbor = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
+
+                    // 高度低於相鄰平均的 60% → 明顯狹窄
+                    if (d.height < avgNeighbor * 0.6) {
                         results.push({
-                            level: discHeights[i].level,
-                            issue: `椎間盤高度遞進異常`,
+                            level: d.level,
+                            issue: `椎間盤高度明顯偏低`,
                             severity: 'warning'
                         });
+                        flagged.add(d.level);
                     }
                 }
             } else if (config.expectedHeightPattern === 'increasing') {
@@ -1649,6 +2021,13 @@
             const btnFinish = document.getElementById('btnFinishEarly');
             if (btnFinish) {
                 btnFinish.style.display = (completed >= 2 && !annotationFinished && completed < total) ? '' : 'none';
+            }
+
+            // 顯示/隱藏「刪除選取」按鈕
+            const btnDelSel = document.getElementById('btnDeleteSelected');
+            if (btnDelSel) {
+                btnDelSel.style.display = selectedVertebrae.size > 0 ? '' : 'none';
+                document.getElementById('selectedCount').textContent = selectedVertebrae.size;
             }
 
             updateCurrentTask();
@@ -1721,9 +2100,15 @@
                 // 選單包含所有椎體名稱
                 const allNames = config.vertebrae;
 
+                const isSelected = selectedVertebrae.has(idx);
+
                 html += `
-                    <div class="vertebra-card">
+                    <div class="vertebra-card" style="${isSelected ? 'border: 2px solid #ff3333; background: #fff5f5;' : ''}">
                         <div class="vertebra-header" onclick="toggleVertebraBody(${idx})">
+                            <input type="checkbox" ${isSelected ? 'checked' : ''}
+                                onclick="event.stopPropagation(); toggleSelectVertebra(${idx})"
+                                title="選取此椎體 (可框選或 Delete 刪除)"
+                                style="margin-right: 6px; cursor: pointer;">
                             <div class="vertebra-name">
                                 <select onchange="changeVertebraName(${idx}, this.value)" onclick="event.stopPropagation()">
                                     ${allNames.map(name =>
@@ -1839,20 +2224,20 @@
                     abnormalities.push({
                         type: 'danger',
                         title: `${v.name} Anterior Wedging Fracture`,
-                        detail: `前緣/後緣比例: ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}% (< 75%)`
+                        detail: `Ant/Post: ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}% (< 80%)`
                     });
                 } else if (abnType === 'crushDeformity') {
                     abnormalities.push({
                         type: 'danger',
                         title: `${v.name} Crush Deformity Fracture`,
-                        detail: `前緣/後緣比例: ${(v.anteriorHeight / v.posteriorHeight * 100).toFixed(0)}% (> 125%)`
+                        detail: `Post/Ant: ${(v.posteriorHeight / v.anteriorHeight * 100).toFixed(0)}% (< 80%)`
                     });
                 }
                 if (biconcave) {
                     abnormalities.push({
                         type: 'danger',
                         title: `${v.name} Biconcave Compression`,
-                        detail: `中段高度: ${(v.middleHeight).toFixed(1)} px (< 75% 側邊平均)`
+                        detail: `Mid/Post: ${(v.middleHeight / v.posteriorHeight * 100).toFixed(0)}% (< 80%)`
                     });
                 }
             });

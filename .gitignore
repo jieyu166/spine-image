@@ -40,6 +40,9 @@ _ul
 # Claude
 .claude/
 
+# SpineFM weights (large files)
+spinefm_weights/
+
 # Temporary
 *.tmp
 *.temp
