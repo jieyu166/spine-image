@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.1
-Spine Vertebra Corner Detection - ML Training Script V3.1
+脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.2
+Spine Vertebra Corner Detection - ML Training Script V3.2
+
+V3.2 改進 (縮小 domain gap):
+- Backbone 改用 RadImageNet ResNet50 預訓練 (1.35M 放射影像)
+  取代原本 ImageNet (貓狗車) 權重，大幅降低 X-ray domain gap
+- 權重下載: https://github.com/BMEII-AI/RadImageNet
+  放到 pretrained/RadImageNet-ResNet50.pt (不存在時自動 fallback 到 ImageNet)
+- 新增 CLI: --epochs / --pretrained-path，方便煙霧測試
 
 V3.1 改進 (解決小樣本模式崩塌問題):
 - 凍結 backbone layer0~layer2: 減少可訓練參數從 36M → ~13M
@@ -25,6 +32,7 @@ V3.0 基礎:
 
 import os
 import json
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -44,6 +52,39 @@ warnings.filterwarnings('ignore')
 
 # ── Heatmap 輸出解析度 ──
 HEATMAP_SIZE = 128  # 輸出 128x128 heatmap (比 512 小，減少記憶體)
+
+# ── RadImageNet 預訓練權重 ──
+# V3.2: backbone 改用 RadImageNet (medical image domain) 取代 ImageNet (貓狗車)
+# 下載: https://github.com/BMEII-AI/RadImageNet → 放到 pretrained/RadImageNet-ResNet50.pt
+RADIMAGENET_PATH_DEFAULT = os.path.join('pretrained', 'RadImageNet-ResNet50.pt')
+
+
+def load_radimagenet_weights(resnet, weights_path):
+    """載入 RadImageNet ResNet50 權重到 torchvision resnet50
+
+    處理常見 key 差異：
+      - `module.` 前綴 (DataParallel 儲存) → 去掉
+      - `fc.*` 分類頭 → 剔除 (num_classes 不同)
+      - 外包一層 {'state_dict': ...} 或 {'model': ...} → 拆開
+    """
+    state_dict = torch.load(weights_path, map_location='cpu')
+    if isinstance(state_dict, dict):
+        for key in ('state_dict', 'model', 'model_state_dict'):
+            if key in state_dict and isinstance(state_dict[key], dict):
+                state_dict = state_dict[key]
+                break
+
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith('fc.')}
+
+    missing, unexpected = resnet.load_state_dict(state_dict, strict=False)
+    non_fc_missing = [k for k in missing if not k.startswith('fc.')]
+    matched = len(state_dict) - len(unexpected)
+    print(f"  [RadImageNet] Loaded {weights_path}  matched={matched} keys")
+    if non_fc_missing:
+        print(f"  [RadImageNet] Warning missing (non-fc): {non_fc_missing[:5]}...")
+    if unexpected:
+        print(f"  [RadImageNet] Warning unexpected: {unexpected[:5]}...")
 
 
 class VertebraDataset(Dataset):
@@ -337,14 +378,34 @@ class VertebraCornerModel(nn.Module):
     - 更強的 Dropout 避免小數據集過擬合
     """
 
-    def __init__(self, max_vertebrae=8, pretrained=True):
+    def __init__(self, max_vertebrae=8, pretrained=True,
+                 pretrained_path=RADIMAGENET_PATH_DEFAULT):
+        """
+        Args:
+            pretrained: True=載入 pretrained backbone, False=隨機初始化 (inference 用)
+            pretrained_path: RadImageNet 權重檔路徑。檔案不存在時 fallback 到 ImageNet。
+        """
         super(VertebraCornerModel, self).__init__()
 
         self.max_vertebrae = max_vertebrae
         self.num_channels = max_vertebrae * 4
 
-        # Backbone - ResNet50 (分層提取用於 skip connection)
-        resnet = models.resnet50(pretrained=pretrained)
+        # ── Backbone: ResNet50 with medical-domain pretrained weights ──
+        # V3.2: 優先用 RadImageNet (1.35M 放射影像)；找不到檔案時 fallback 到 ImageNet。
+        # 這是整個改造計畫核心：50 張標註不夠補 ImageNet → X-ray 的 domain gap。
+        if pretrained and pretrained_path and os.path.isfile(pretrained_path):
+            resnet = models.resnet50(weights=None)
+            load_radimagenet_weights(resnet, pretrained_path)
+            self.backbone_source = 'radimagenet'
+        elif pretrained:
+            if pretrained_path:
+                print(f"  [Backbone] RadImageNet weights not found at '{pretrained_path}'")
+                print(f"  [Backbone] Fallback to torchvision ImageNet pretrained ResNet50")
+            resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+            self.backbone_source = 'imagenet'
+        else:
+            resnet = models.resnet50(weights=None)
+            self.backbone_source = 'random'
         self.layer0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)  # /4, 64ch
         self.layer1 = resnet.layer1  # /4,  256ch
         self.layer2 = resnet.layer2  # /8,  512ch
@@ -686,7 +747,8 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.1',
+                    'model_version': 'v3.2',
+                    'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
                 print("  >> Saved best model")
@@ -698,7 +760,8 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.1',
+                    'model_version': 'v3.2',
+                    'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
 
@@ -789,18 +852,37 @@ def collate_fn(batch):
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Spine Vertebra Corner Detection - Training V3.2')
+    parser.add_argument('--epochs', type=int, default=200,
+                        help='訓練 epoch 數 (煙霧測試建議 5)')
+    parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight-decay', type=float, default=1e-3)
+    parser.add_argument('--repeat-dataset', type=int, default=8,
+                        help='每 epoch 重複 dataset 的倍數 (增加 augmentation 多樣性)')
+    parser.add_argument('--pretrained-path', type=str, default=RADIMAGENET_PATH_DEFAULT,
+                        help='RadImageNet ResNet50 權重檔路徑；不存在會 fallback 到 ImageNet')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug 模式：縮短 epoch、印詳細資訊')
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     config = {
         'data_dir': '.',
         'train_annotations': 'endplate_training_data/annotations/train_annotations.json',
         'val_annotations': 'endplate_training_data/annotations/val_annotations.json',
-        'batch_size': 4,
-        'epochs': 200,             # V3.1: 多訓練一些 (有 repeat + 凍結)
-        'learning_rate': 1e-3,     # V3.1: decoder 學習率提高 (backbone 凍結後可更大)
-        'weight_decay': 1e-3,      # V3.1: 更強正則化 (小數據集)
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'learning_rate': args.lr,
+        'weight_decay': args.weight_decay,
         'num_workers': 0,
         'max_vertebrae': 8,
-        'repeat_dataset': 8,       # V3.1: 每 epoch 重複 8 次 (更多 augmentation 機會)
+        'repeat_dataset': args.repeat_dataset,
+        'pretrained_path': args.pretrained_path,
     }
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -853,11 +935,13 @@ def main():
 
     model = VertebraCornerModel(
         max_vertebrae=config['max_vertebrae'],
-        pretrained=True
+        pretrained=True,
+        pretrained_path=config['pretrained_path'],
     )
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {total_params:,} (trainable: {trainable_params:,})")
+    print(f"Backbone source: {model.backbone_source}")
 
     trainer = VertebraTrainer(model, train_loader, val_loader, device, config)
     trainer.train()

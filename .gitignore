@@ -13,6 +13,11 @@ pip-log.txt
 *.pth
 checkpoint_*.pth
 
+# Pretrained backbone weights (RadImageNet etc.)
+pretrained/*.pt
+pretrained/*.pth
+pretrained/*.bin
+
 # Training data and results
 endplate_training_data/
 inference_results/
