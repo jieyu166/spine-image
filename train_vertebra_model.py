@@ -8,7 +8,12 @@ V3.2 改進 (縮小 domain gap):
   取代原本 ImageNet (貓狗車) 權重，大幅降低 X-ray domain gap
 - 權重下載: https://github.com/BMEII-AI/RadImageNet
   放到 pretrained/RadImageNet-ResNet50.pt (不存在時自動 fallback 到 ImageNet)
-- 新增 CLI: --epochs / --pretrained-path，方便煙霧測試
+- X-ray 專屬 augmentation: 移除 HorizontalFlip / InvertImg / CoarseDropout /
+  Affine shear / RandomGamma，其餘 aug 幅度保守化
+- 兩階段 fine-tune schedule (--unfreeze-epoch):
+    Stage A: 凍結全 backbone，lr=1e-3，訓練 decoder + head
+    Stage B: 解凍 layer3 + layer4，lr=1e-4，fine-tune 深層 feature
+- 新增 CLI: --epochs / --pretrained-path / --unfreeze-epoch / --stage-b-lr
 
 V3.1 改進 (解決小樣本模式崩塌問題):
 - 凍結 backbone layer0~layer2: 減少可訓練參數從 36M → ~13M
@@ -718,6 +723,40 @@ class VertebraTrainer:
         self.best_val_loss = float('inf')
         self.train_losses = []
         self.val_losses = []
+        self._stage_b_active = False
+
+    def _enter_stage_b(self):
+        """Stage B: 解凍 backbone layer3 + layer4，切換到低 lr
+
+        配合 RadImageNet pretrained backbone 的兩階段 fine-tune：
+          Stage A (epoch 0 ~ unfreeze_epoch-1): 凍結全部 backbone，只訓練 decoder + head
+          Stage B (epoch unfreeze_epoch 起): 解凍深層 (layer3, layer4)，lr 降 10 倍
+
+        layer0/1/2 保持凍結 (low-level feature 不需要動)。
+        """
+        if self._stage_b_active:
+            return
+
+        for param in self.model.layer3.parameters():
+            param.requires_grad = True
+        for param in self.model.layer4.parameters():
+            param.requires_grad = True
+
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        n_trainable = sum(p.numel() for p in trainable)
+        n_frozen = sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
+        stage_b_lr = self.config.get('stage_b_lr', 1e-4)
+
+        # 重建 optimizer: 新 trainable param set + 低 lr (避免毀掉 pretrained feature)
+        self.optimizer = optim.AdamW(
+            trainable, lr=stage_b_lr, weight_decay=self.config['weight_decay']
+        )
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=20, T_mult=2
+        )
+        self._stage_b_active = True
+        print(f"\n=== Stage B: Unfroze layer3 + layer4 ===")
+        print(f"  Trainable params: {n_trainable:,}  Frozen: {n_frozen:,}  lr: {stage_b_lr}")
 
     def train_epoch(self):
         self.model.train()
@@ -780,8 +819,15 @@ class VertebraTrainer:
         print(f"Heatmap size: {HEATMAP_SIZE}x{HEATMAP_SIZE}")
         print("-" * 50)
 
+        unfreeze_at = self.config.get('unfreeze_epoch')
+
         for epoch in range(self.config['epochs']):
-            print(f"\nEpoch {epoch+1}/{self.config['epochs']}")
+            # Stage B trigger: 在指定 epoch 開始前解凍深層 backbone
+            if unfreeze_at is not None and unfreeze_at >= 0 and epoch == unfreeze_at:
+                self._enter_stage_b()
+
+            print(f"\nEpoch {epoch+1}/{self.config['epochs']}" +
+                  (f" [Stage B]" if self._stage_b_active else " [Stage A]"))
 
             train_loss, train_comp = self.train_epoch()
             val_loss, val_comp = self.validate()
@@ -928,6 +974,10 @@ def parse_args():
                         help='每 epoch 重複 dataset 的倍數 (增加 augmentation 多樣性)')
     parser.add_argument('--pretrained-path', type=str, default=RADIMAGENET_PATH_DEFAULT,
                         help='RadImageNet ResNet50 權重檔路徑；不存在會 fallback 到 ImageNet')
+    parser.add_argument('--unfreeze-epoch', type=int, default=5,
+                        help='Stage B 起始 epoch (解凍 layer3+layer4)；-1 表示永不解凍')
+    parser.add_argument('--stage-b-lr', type=float, default=1e-4,
+                        help='Stage B 的 learning rate (建議比 stage A 低 10 倍)')
     parser.add_argument('--debug', action='store_true',
                         help='Debug 模式：縮短 epoch、印詳細資訊')
     return parser.parse_args()
@@ -948,6 +998,8 @@ def main():
         'max_vertebrae': 8,
         'repeat_dataset': args.repeat_dataset,
         'pretrained_path': args.pretrained_path,
+        'unfreeze_epoch': args.unfreeze_epoch if args.unfreeze_epoch >= 0 else None,
+        'stage_b_lr': args.stage_b_lr,
     }
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
