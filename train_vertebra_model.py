@@ -59,13 +59,45 @@ HEATMAP_SIZE = 128  # 輸出 128x128 heatmap (比 512 小，減少記憶體)
 RADIMAGENET_PATH_DEFAULT = os.path.join('pretrained', 'RadImageNet-ResNet50.pt')
 
 
+# nn.Sequential(*list(resnet.children())[:-2]) 時各層的 index 對應關係
+# 用於把 "backbone.N.X" 格式的 RadImageNet 權重 remap 回 torchvision resnet50 的扁平 key
+_SEQ_TO_RESNET = {
+    '0': 'conv1',
+    '1': 'bn1',
+    # '2': relu (無參數), '3': maxpool (無參數)
+    '4': 'layer1',
+    '5': 'layer2',
+    '6': 'layer3',
+    '7': 'layer4',
+}
+
+
+def _remap_sequential_keys(state_dict, prefix):
+    """把 nn.Sequential 格式 key (如 backbone.0.weight) remap 回 torchvision 扁平 key"""
+    remapped = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            rest = k[len(prefix):]       # e.g. "0.weight" / "4.0.conv1.weight"
+            dot = rest.find('.')
+            if dot < 0:
+                continue
+            idx, suffix = rest[:dot], rest[dot+1:]
+            if idx in _SEQ_TO_RESNET:
+                remapped[f'{_SEQ_TO_RESNET[idx]}.{suffix}'] = v
+            # 其他 index (relu / maxpool / classifier head) 無參數或不需要
+        else:
+            remapped[k] = v
+    return remapped
+
+
 def load_radimagenet_weights(resnet, weights_path):
     """載入 RadImageNet ResNet50 權重到 torchvision resnet50
 
     處理常見 key 差異：
-      - `module.` 前綴 (DataParallel 儲存) → 去掉
-      - `fc.*` 分類頭 → 剔除 (num_classes 不同)
       - 外包一層 {'state_dict': ...} 或 {'model': ...} → 拆開
+      - `module.` 前綴 (DataParallel 儲存) → 去掉
+      - `backbone.N.X` / `encoder.N.X` / `features.N.X` (nn.Sequential 包裝) → remap
+      - `fc.*` 分類頭 → 剔除 (num_classes 不同)
     """
     state_dict = torch.load(weights_path, map_location='cpu')
     if isinstance(state_dict, dict):
@@ -75,6 +107,15 @@ def load_radimagenet_weights(resnet, weights_path):
                 break
 
     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+    # 偵測 nn.Sequential 包裝 (第一個 key 像是 "backbone.0.weight")
+    seq_prefixes = ('backbone.', 'encoder.', 'features.')
+    for prefix in seq_prefixes:
+        if any(k.startswith(prefix) for k in state_dict):
+            print(f"  [RadImageNet] Detected nn.Sequential wrapping (prefix='{prefix}'), remapping keys")
+            state_dict = _remap_sequential_keys(state_dict, prefix)
+            break
+
     state_dict = {k: v for k, v in state_dict.items() if not k.startswith('fc.')}
 
     missing, unexpected = resnet.load_state_dict(state_dict, strict=False)
@@ -85,6 +126,12 @@ def load_radimagenet_weights(resnet, weights_path):
         print(f"  [RadImageNet] Warning missing (non-fc): {non_fc_missing[:5]}...")
     if unexpected:
         print(f"  [RadImageNet] Warning unexpected: {unexpected[:5]}...")
+    # 如果仍然 matched=0 → 後面整個訓練等同隨機初始化，直接拋錯比較明顯
+    if matched == 0:
+        raise RuntimeError(
+            f"RadImageNet 權重完全沒載入任何 key。請檢查 {weights_path} 格式。"
+            f"前 5 個原始 key: {list(torch.load(weights_path, map_location='cpu').keys())[:5]}"
+        )
 
 
 class VertebraDataset(Dataset):
