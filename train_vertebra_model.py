@@ -842,29 +842,40 @@ class VertebraTrainer:
 
 
 def get_transforms(is_training=True):
-    """V3.1 加強版 augmentation (針對小數據集 + X-ray 影像)"""
+    """V3.2 X-ray 專屬 augmentation pipeline
+
+    相較 V3.1 的大而全 aug 管線，V3.2 針對椎體 corner detection 的 X-ray 特性調整：
+
+    移除:
+      - HorizontalFlip: C-spine lateral 前後方向有醫學意義 (C2 前緣/後緣不可混)，
+        翻轉會讓 anterior/posterior 標註錯位；L-spine 雖可 flip 但為簡化一律停用
+      - InvertImg: X-ray 負片是不同 modality，非 window/level 變化，會污染 feature
+      - CoarseDropout: 小範圍黑塊會遮蓋椎體關鍵邊界，且會讓 keypoint 落在黑塊內
+        → 觸發 Albumentations 丟棄 keypoint 的 bug
+      - Affine shear: 椎體幾何關係不應被剪切扭曲，下游 Cobb / wedge 也會失真
+      - RandomGamma: 與 brightness/contrast 作用重疊
+
+    保守化:
+      - Rotate ±10° (原 ±15°): 椎體朝向不應大變
+      - ShiftScaleRotate shift 0.05 / scale 0.1 (原 0.1 / 0.2): 減少角點出界機率
+      - RandomBrightnessContrast ±0.15 (原 ±0.3): 更接近真實 window/level 變化
+      - CLAHE clip_limit (1, 4) 隨機 (原固定 4.0): 避免永遠過度增強
+      - GaussNoise var 10-50 (原 10-80): sensor noise 但不遮蓋結構
+    """
     if is_training:
         return A.Compose([
             A.Resize(512, 512),
-            # 幾何變換
-            A.HorizontalFlip(p=0.3),
+            # 幾何 (保守：椎體朝向應接近原樣)
+            A.Rotate(limit=10, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
             A.ShiftScaleRotate(
-                shift_limit=0.1, scale_limit=0.2, rotate_limit=15,
-                border_mode=cv2.BORDER_REFLECT_101, p=0.6
+                shift_limit=0.05, scale_limit=0.1, rotate_limit=0,
+                border_mode=cv2.BORDER_REFLECT_101, p=0.5
             ),
-            A.Affine(shear=(-8, 8), p=0.3),  # 剪切變形
-            # 光照變換 (X-ray 很重要)
-            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.4),
-            A.RandomGamma(gamma_limit=(60, 140), p=0.4),
-            # X-ray 特有: 反轉 (模擬不同 window/level)
-            A.InvertImg(p=0.15),
-            # 模擬雜訊/模糊
-            A.GaussNoise(var_limit=(10, 80), p=0.3),
-            A.GaussianBlur(blur_limit=(3, 7), p=0.3),
-            # 遮擋模擬 (增加魯棒性)
-            A.CoarseDropout(max_holes=3, max_height=40, max_width=40, p=0.2),
-            # 正規化
+            # 光照 / 對比度 (X-ray 核心)
+            A.CLAHE(clip_limit=(1, 4), tile_grid_size=(8, 8), p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.5),
+            # 輕度雜訊
+            A.GaussNoise(var_limit=(10, 50), p=0.3),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
