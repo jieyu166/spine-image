@@ -213,9 +213,16 @@ class VertebraDataset(Dataset):
             image = transformed['image']
             transformed_valid_kp = transformed['keypoints']
 
+            # 防禦: Albumentations 某些 transform (CoarseDropout / 大角度旋轉) 即使 remove_invisible=False
+            # 也會丟掉出界的 keypoint，導致回傳數量比輸入少 → 差的標記為無效即可
             transformed_kp = [[0.0, 0.0]] * len(keypoints)
+            n_out = len(transformed_valid_kp)
             for j, idx_orig in enumerate(valid_kp_indices):
-                transformed_kp[idx_orig] = list(transformed_valid_kp[j])
+                if j < n_out:
+                    transformed_kp[idx_orig] = list(transformed_valid_kp[j])
+                else:
+                    transformed_kp[idx_orig] = [0.0, 0.0]
+                    valid_flags[idx_orig] = 0.0
         else:
             image = cv2.resize(image, (512, 512))
             scale_x = 512 / original_w
