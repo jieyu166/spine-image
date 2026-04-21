@@ -150,8 +150,11 @@ class VertebraInference:
 
         epoch = checkpoint.get('epoch', '?')
         val_loss = checkpoint.get('val_loss', None)
-        print(f"Model V{self.model_version} loaded (epoch {epoch}" +
-              (f", val_loss {val_loss:.4f})" if val_loss else ")"))
+        backbone_src = checkpoint.get('backbone_source', None)
+        suffix = f", val_loss {val_loss:.4f}" if val_loss else ""
+        if backbone_src:
+            suffix += f", backbone={backbone_src}"
+        print(f"Model V{self.model_version} loaded (epoch {epoch}{suffix})")
 
     def _load_v2_model(self, state_dict, max_vertebrae):
         """載入 V2 舊版模型 checkpoint (backbone + heatmap_branch + regression_branch)"""

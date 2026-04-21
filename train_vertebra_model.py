@@ -1,7 +1,27 @@
 #!/usr/bin/env python3
 """
-脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.1
-Spine Vertebra Corner Detection - ML Training Script V3.1
+脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.3
+Spine Vertebra Corner Detection - ML Training Script V3.3
+
+V3.3 改進 (提升定位精度):
+- HEATMAP_SIZE: 128 → 256 (輸出解析度 2×)
+- Decoder 新增 up1 stage，實際產出 256×256 feature map
+  (不是單純 bilinear 放大，是多一個 conv 層讓網路能產生更細的 heatmap)
+- Heatmap sigma: 6 → 3 (搭配解析度提升，實際物理半徑縮小 4 倍，約 12→6 px)
+- 預期：定位誤差從 ~4-5 像素降到 ~2-3 像素
+- 注意：state_dict 新增 up1 key，V3.2 checkpoint 無法直接載入 → 需重新訓練
+
+V3.2 改進 (縮小 domain gap):
+- Backbone 改用 RadImageNet ResNet50 預訓練 (1.35M 放射影像)
+  取代原本 ImageNet (貓狗車) 權重，大幅降低 X-ray domain gap
+- 權重下載: https://github.com/BMEII-AI/RadImageNet
+  放到 pretrained/RadImageNet-ResNet50.pt (不存在時自動 fallback 到 ImageNet)
+- X-ray 專屬 augmentation: 移除 HorizontalFlip / InvertImg / CoarseDropout /
+  Affine shear / RandomGamma，其餘 aug 幅度保守化
+- 兩階段 fine-tune schedule (--unfreeze-epoch):
+    Stage A: 凍結全 backbone，lr=1e-3，訓練 decoder + head
+    Stage B: 解凍 layer3 + layer4，lr=1e-4，fine-tune 深層 feature
+- 新增 CLI: --epochs / --pretrained-path / --unfreeze-epoch / --stage-b-lr
 
 V3.1 改進 (解決小樣本模式崩塌問題):
 - 凍結 backbone layer0~layer2: 減少可訓練參數從 36M → ~13M
@@ -25,6 +45,7 @@ V3.0 基礎:
 
 import os
 import json
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -43,7 +64,89 @@ warnings.filterwarnings('ignore')
 
 
 # ── Heatmap 輸出解析度 ──
-HEATMAP_SIZE = 128  # 輸出 128x128 heatmap (比 512 小，減少記憶體)
+# V3.3: 128 → 256，搭配 decoder up1 stage 提升定位精度
+# 單像素物理寬度：512/256 = 2px (V3.2 是 4px) → 亞像素 refine 之後誤差更小
+HEATMAP_SIZE = 256
+
+# ── RadImageNet 預訓練權重 ──
+# V3.2: backbone 改用 RadImageNet (medical image domain) 取代 ImageNet (貓狗車)
+# 下載: https://github.com/BMEII-AI/RadImageNet → 放到 pretrained/RadImageNet-ResNet50.pt
+RADIMAGENET_PATH_DEFAULT = os.path.join('pretrained', 'RadImageNet-ResNet50.pt')
+
+
+# nn.Sequential(*list(resnet.children())[:-2]) 時各層的 index 對應關係
+# 用於把 "backbone.N.X" 格式的 RadImageNet 權重 remap 回 torchvision resnet50 的扁平 key
+_SEQ_TO_RESNET = {
+    '0': 'conv1',
+    '1': 'bn1',
+    # '2': relu (無參數), '3': maxpool (無參數)
+    '4': 'layer1',
+    '5': 'layer2',
+    '6': 'layer3',
+    '7': 'layer4',
+}
+
+
+def _remap_sequential_keys(state_dict, prefix):
+    """把 nn.Sequential 格式 key (如 backbone.0.weight) remap 回 torchvision 扁平 key"""
+    remapped = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            rest = k[len(prefix):]       # e.g. "0.weight" / "4.0.conv1.weight"
+            dot = rest.find('.')
+            if dot < 0:
+                continue
+            idx, suffix = rest[:dot], rest[dot+1:]
+            if idx in _SEQ_TO_RESNET:
+                remapped[f'{_SEQ_TO_RESNET[idx]}.{suffix}'] = v
+            # 其他 index (relu / maxpool / classifier head) 無參數或不需要
+        else:
+            remapped[k] = v
+    return remapped
+
+
+def load_radimagenet_weights(resnet, weights_path):
+    """載入 RadImageNet ResNet50 權重到 torchvision resnet50
+
+    處理常見 key 差異：
+      - 外包一層 {'state_dict': ...} 或 {'model': ...} → 拆開
+      - `module.` 前綴 (DataParallel 儲存) → 去掉
+      - `backbone.N.X` / `encoder.N.X` / `features.N.X` (nn.Sequential 包裝) → remap
+      - `fc.*` 分類頭 → 剔除 (num_classes 不同)
+    """
+    state_dict = torch.load(weights_path, map_location='cpu')
+    if isinstance(state_dict, dict):
+        for key in ('state_dict', 'model', 'model_state_dict'):
+            if key in state_dict and isinstance(state_dict[key], dict):
+                state_dict = state_dict[key]
+                break
+
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+    # 偵測 nn.Sequential 包裝 (第一個 key 像是 "backbone.0.weight")
+    seq_prefixes = ('backbone.', 'encoder.', 'features.')
+    for prefix in seq_prefixes:
+        if any(k.startswith(prefix) for k in state_dict):
+            print(f"  [RadImageNet] Detected nn.Sequential wrapping (prefix='{prefix}'), remapping keys")
+            state_dict = _remap_sequential_keys(state_dict, prefix)
+            break
+
+    state_dict = {k: v for k, v in state_dict.items() if not k.startswith('fc.')}
+
+    missing, unexpected = resnet.load_state_dict(state_dict, strict=False)
+    non_fc_missing = [k for k in missing if not k.startswith('fc.')]
+    matched = len(state_dict) - len(unexpected)
+    print(f"  [RadImageNet] Loaded {weights_path}  matched={matched} keys")
+    if non_fc_missing:
+        print(f"  [RadImageNet] Warning missing (non-fc): {non_fc_missing[:5]}...")
+    if unexpected:
+        print(f"  [RadImageNet] Warning unexpected: {unexpected[:5]}...")
+    # 如果仍然 matched=0 → 後面整個訓練等同隨機初始化，直接拋錯比較明顯
+    if matched == 0:
+        raise RuntimeError(
+            f"RadImageNet 權重完全沒載入任何 key。請檢查 {weights_path} 格式。"
+            f"前 5 個原始 key: {list(torch.load(weights_path, map_location='cpu').keys())[:5]}"
+        )
 
 
 class VertebraDataset(Dataset):
@@ -172,9 +275,16 @@ class VertebraDataset(Dataset):
             image = transformed['image']
             transformed_valid_kp = transformed['keypoints']
 
+            # 防禦: Albumentations 某些 transform (CoarseDropout / 大角度旋轉) 即使 remove_invisible=False
+            # 也會丟掉出界的 keypoint，導致回傳數量比輸入少 → 差的標記為無效即可
             transformed_kp = [[0.0, 0.0]] * len(keypoints)
+            n_out = len(transformed_valid_kp)
             for j, idx_orig in enumerate(valid_kp_indices):
-                transformed_kp[idx_orig] = list(transformed_valid_kp[j])
+                if j < n_out:
+                    transformed_kp[idx_orig] = list(transformed_valid_kp[j])
+                else:
+                    transformed_kp[idx_orig] = [0.0, 0.0]
+                    valid_flags[idx_orig] = 0.0
         else:
             image = cv2.resize(image, (512, 512))
             scale_x = 512 / original_w
@@ -203,9 +313,11 @@ class VertebraDataset(Dataset):
             valid_flags.append(0.0)
 
         # ── 多通道 heatmap: 每個 slot 一個 channel ──
-        # sigma=6: 在 128x128 上產生 ~37x37 像素的高斯，確保足夠正樣本
+        # V3.3: sigma=3 on 256×256 (V3.2 是 sigma=6 on 128×128)
+        # 物理半徑：3 * (512/256) = 6 原圖像素 (V3.2 約 24 原圖像素)
+        # 更緊的高斯 → 定位更精確，但 focal loss 要能 handle 更少正樣本
         heatmaps = self.create_multi_channel_heatmap(
-            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=6
+            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=3
         )
 
         targets = {
@@ -251,11 +363,12 @@ class VertebraDataset(Dataset):
 
         return None
 
-    def create_multi_channel_heatmap(self, keypoints, valid_flags, size, sigma=6):
+    def create_multi_channel_heatmap(self, keypoints, valid_flags, size, sigma=3):
         """每個角點 slot 獨立一個 channel 的高斯熱圖
 
-        sigma=6 在 128x128 上產生 ~37 像素直徑的高斯 (3*sigma 半徑)
+        V3.3 預設 sigma=3 在 256x256 上產生 ~19 像素直徑的高斯 (3*sigma 半徑)
         中心值=1.0，sigma 處值≈0.61，2*sigma 處≈0.14
+        （V3.2 是 sigma=6 on 128x128；物理半徑縮小 4 倍）
         """
         h, w = size
         num_ch = self.num_channels
@@ -337,14 +450,34 @@ class VertebraCornerModel(nn.Module):
     - 更強的 Dropout 避免小數據集過擬合
     """
 
-    def __init__(self, max_vertebrae=8, pretrained=True):
+    def __init__(self, max_vertebrae=8, pretrained=True,
+                 pretrained_path=RADIMAGENET_PATH_DEFAULT):
+        """
+        Args:
+            pretrained: True=載入 pretrained backbone, False=隨機初始化 (inference 用)
+            pretrained_path: RadImageNet 權重檔路徑。檔案不存在時 fallback 到 ImageNet。
+        """
         super(VertebraCornerModel, self).__init__()
 
         self.max_vertebrae = max_vertebrae
         self.num_channels = max_vertebrae * 4
 
-        # Backbone - ResNet50 (分層提取用於 skip connection)
-        resnet = models.resnet50(pretrained=pretrained)
+        # ── Backbone: ResNet50 with medical-domain pretrained weights ──
+        # V3.2: 優先用 RadImageNet (1.35M 放射影像)；找不到檔案時 fallback 到 ImageNet。
+        # 這是整個改造計畫核心：50 張標註不夠補 ImageNet → X-ray 的 domain gap。
+        if pretrained and pretrained_path and os.path.isfile(pretrained_path):
+            resnet = models.resnet50(weights=None)
+            load_radimagenet_weights(resnet, pretrained_path)
+            self.backbone_source = 'radimagenet'
+        elif pretrained:
+            if pretrained_path:
+                print(f"  [Backbone] RadImageNet weights not found at '{pretrained_path}'")
+                print(f"  [Backbone] Fallback to torchvision ImageNet pretrained ResNet50")
+            resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+            self.backbone_source = 'imagenet'
+        else:
+            resnet = models.resnet50(weights=None)
+            self.backbone_source = 'random'
         self.layer0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)  # /4, 64ch
         self.layer1 = resnet.layer1  # /4,  256ch
         self.layer2 = resnet.layer2  # /8,  512ch
@@ -387,6 +520,20 @@ class VertebraCornerModel(nn.Module):
         # up2: d3(256) → 上採樣 → concat x1(256) → conv
         self.up2 = nn.Sequential(
             nn.Conv2d(256 + 256, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )
+
+        # ── V3.3: up1 decoder stage ──
+        # d2 是 H/4=128×128；上採樣到 H/2=256×256，再過兩層 conv 產生真正的 256 feature
+        # (沒有 encoder skip 可用 — resnet 的 stem maxpool 已把 H/2 feature 丟掉)
+        # 關鍵理由：單純 bilinear interpolate 不會增加資訊，conv 才會讓網路重新學細節
+        self.up1 = nn.Sequential(
+            nn.Conv2d(128, 128, 3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.Dropout2d(0.1),
@@ -443,8 +590,14 @@ class VertebraCornerModel(nn.Module):
                     mode='bilinear', align_corners=True)                   # [B, 256, H/4, W/4]
         d2 = self.up2(torch.cat([d2_up, x1], dim=1))                      # [B, 128, H/4, W/4]
 
+        # V3.3 up1: d2 → upsample to H/2 → conv (沒 skip，靠 conv 產生細節)
+        d1_up = torch.nn.functional.interpolate(
+            d2, scale_factor=2, mode='bilinear', align_corners=True
+        )                                                                  # [B, 128, H/2, W/2]
+        d1 = self.up1(d1_up)                                               # [B, 128, H/2, W/2]
+
         # ── CoordConv + Channel Embedding ──
-        feat = self.coord_conv(d2)        # [B, 64, H/4, W/4]
+        feat = self.coord_conv(d1)        # [B, 64, H/2, W/2]
         feat = self.heatmap_relu(self.heatmap_bn(feat))
 
         # Channel embedding: 每個 output channel 用獨特的 embedding 向量
@@ -497,7 +650,8 @@ class FocalLoss(nn.Module):
         pred = pred.clamp(1e-6, 1 - 1e-6)
 
         # 正樣本: 高斯核心區域 (值 > pos_threshold)
-        # sigma=6 時，距中心 <=7.5 像素 (1.25*sigma) 的區域值 > 0.3
+        # V3.3 sigma=3 on 256×256 時，距中心 <=3.75 像素的區域值 > 0.3
+        # 比 V3.2 (sigma=6 on 128) 少 ~4× 正樣本，但仍夠 focal loss 收斂
         pos_mask = target.ge(self.pos_threshold)
         neg_mask = target.lt(self.pos_threshold)
 
@@ -603,6 +757,40 @@ class VertebraTrainer:
         self.best_val_loss = float('inf')
         self.train_losses = []
         self.val_losses = []
+        self._stage_b_active = False
+
+    def _enter_stage_b(self):
+        """Stage B: 解凍 backbone layer3 + layer4，切換到低 lr
+
+        配合 RadImageNet pretrained backbone 的兩階段 fine-tune：
+          Stage A (epoch 0 ~ unfreeze_epoch-1): 凍結全部 backbone，只訓練 decoder + head
+          Stage B (epoch unfreeze_epoch 起): 解凍深層 (layer3, layer4)，lr 降 10 倍
+
+        layer0/1/2 保持凍結 (low-level feature 不需要動)。
+        """
+        if self._stage_b_active:
+            return
+
+        for param in self.model.layer3.parameters():
+            param.requires_grad = True
+        for param in self.model.layer4.parameters():
+            param.requires_grad = True
+
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+        n_trainable = sum(p.numel() for p in trainable)
+        n_frozen = sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
+        stage_b_lr = self.config.get('stage_b_lr', 1e-4)
+
+        # 重建 optimizer: 新 trainable param set + 低 lr (避免毀掉 pretrained feature)
+        self.optimizer = optim.AdamW(
+            trainable, lr=stage_b_lr, weight_decay=self.config['weight_decay']
+        )
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=20, T_mult=2
+        )
+        self._stage_b_active = True
+        print(f"\n=== Stage B: Unfroze layer3 + layer4 ===")
+        print(f"  Trainable params: {n_trainable:,}  Frozen: {n_frozen:,}  lr: {stage_b_lr}")
 
     def train_epoch(self):
         self.model.train()
@@ -665,8 +853,15 @@ class VertebraTrainer:
         print(f"Heatmap size: {HEATMAP_SIZE}x{HEATMAP_SIZE}")
         print("-" * 50)
 
+        unfreeze_at = self.config.get('unfreeze_epoch')
+
         for epoch in range(self.config['epochs']):
-            print(f"\nEpoch {epoch+1}/{self.config['epochs']}")
+            # Stage B trigger: 在指定 epoch 開始前解凍深層 backbone
+            if unfreeze_at is not None and unfreeze_at >= 0 and epoch == unfreeze_at:
+                self._enter_stage_b()
+
+            print(f"\nEpoch {epoch+1}/{self.config['epochs']}" +
+                  (f" [Stage B]" if self._stage_b_active else " [Stage A]"))
 
             train_loss, train_comp = self.train_epoch()
             val_loss, val_comp = self.validate()
@@ -686,7 +881,8 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.1',
+                    'model_version': 'v3.3',
+                    'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
                 print("  >> Saved best model")
@@ -698,7 +894,8 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.1',
+                    'model_version': 'v3.3',
+                    'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
 
@@ -725,29 +922,40 @@ class VertebraTrainer:
 
 
 def get_transforms(is_training=True):
-    """V3.1 加強版 augmentation (針對小數據集 + X-ray 影像)"""
+    """V3.2 X-ray 專屬 augmentation pipeline
+
+    相較 V3.1 的大而全 aug 管線，V3.2 針對椎體 corner detection 的 X-ray 特性調整：
+
+    移除:
+      - HorizontalFlip: C-spine lateral 前後方向有醫學意義 (C2 前緣/後緣不可混)，
+        翻轉會讓 anterior/posterior 標註錯位；L-spine 雖可 flip 但為簡化一律停用
+      - InvertImg: X-ray 負片是不同 modality，非 window/level 變化，會污染 feature
+      - CoarseDropout: 小範圍黑塊會遮蓋椎體關鍵邊界，且會讓 keypoint 落在黑塊內
+        → 觸發 Albumentations 丟棄 keypoint 的 bug
+      - Affine shear: 椎體幾何關係不應被剪切扭曲，下游 Cobb / wedge 也會失真
+      - RandomGamma: 與 brightness/contrast 作用重疊
+
+    保守化:
+      - Rotate ±10° (原 ±15°): 椎體朝向不應大變
+      - ShiftScaleRotate shift 0.05 / scale 0.1 (原 0.1 / 0.2): 減少角點出界機率
+      - RandomBrightnessContrast ±0.15 (原 ±0.3): 更接近真實 window/level 變化
+      - CLAHE clip_limit (1, 4) 隨機 (原固定 4.0): 避免永遠過度增強
+      - GaussNoise var 10-50 (原 10-80): sensor noise 但不遮蓋結構
+    """
     if is_training:
         return A.Compose([
             A.Resize(512, 512),
-            # 幾何變換
-            A.HorizontalFlip(p=0.3),
+            # 幾何 (保守：椎體朝向應接近原樣)
+            A.Rotate(limit=10, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
             A.ShiftScaleRotate(
-                shift_limit=0.1, scale_limit=0.2, rotate_limit=15,
-                border_mode=cv2.BORDER_REFLECT_101, p=0.6
+                shift_limit=0.05, scale_limit=0.1, rotate_limit=0,
+                border_mode=cv2.BORDER_REFLECT_101, p=0.5
             ),
-            A.Affine(shear=(-8, 8), p=0.3),  # 剪切變形
-            # 光照變換 (X-ray 很重要)
-            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.4),
-            A.RandomGamma(gamma_limit=(60, 140), p=0.4),
-            # X-ray 特有: 反轉 (模擬不同 window/level)
-            A.InvertImg(p=0.15),
-            # 模擬雜訊/模糊
-            A.GaussNoise(var_limit=(10, 80), p=0.3),
-            A.GaussianBlur(blur_limit=(3, 7), p=0.3),
-            # 遮擋模擬 (增加魯棒性)
-            A.CoarseDropout(max_holes=3, max_height=40, max_width=40, p=0.2),
-            # 正規化
+            # 光照 / 對比度 (X-ray 核心)
+            A.CLAHE(clip_limit=(1, 4), tile_grid_size=(8, 8), p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.5),
+            # 輕度雜訊
+            A.GaussNoise(var_limit=(10, 50), p=0.3),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
@@ -789,18 +997,43 @@ def collate_fn(batch):
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Spine Vertebra Corner Detection - Training V3.2')
+    parser.add_argument('--epochs', type=int, default=200,
+                        help='訓練 epoch 數 (煙霧測試建議 5)')
+    parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight-decay', type=float, default=1e-3)
+    parser.add_argument('--repeat-dataset', type=int, default=8,
+                        help='每 epoch 重複 dataset 的倍數 (增加 augmentation 多樣性)')
+    parser.add_argument('--pretrained-path', type=str, default=RADIMAGENET_PATH_DEFAULT,
+                        help='RadImageNet ResNet50 權重檔路徑；不存在會 fallback 到 ImageNet')
+    parser.add_argument('--unfreeze-epoch', type=int, default=5,
+                        help='Stage B 起始 epoch (解凍 layer3+layer4)；-1 表示永不解凍')
+    parser.add_argument('--stage-b-lr', type=float, default=1e-4,
+                        help='Stage B 的 learning rate (建議比 stage A 低 10 倍)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug 模式：縮短 epoch、印詳細資訊')
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     config = {
         'data_dir': '.',
         'train_annotations': 'endplate_training_data/annotations/train_annotations.json',
         'val_annotations': 'endplate_training_data/annotations/val_annotations.json',
-        'batch_size': 4,
-        'epochs': 200,             # V3.1: 多訓練一些 (有 repeat + 凍結)
-        'learning_rate': 1e-3,     # V3.1: decoder 學習率提高 (backbone 凍結後可更大)
-        'weight_decay': 1e-3,      # V3.1: 更強正則化 (小數據集)
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'learning_rate': args.lr,
+        'weight_decay': args.weight_decay,
         'num_workers': 0,
         'max_vertebrae': 8,
-        'repeat_dataset': 8,       # V3.1: 每 epoch 重複 8 次 (更多 augmentation 機會)
+        'repeat_dataset': args.repeat_dataset,
+        'pretrained_path': args.pretrained_path,
+        'unfreeze_epoch': args.unfreeze_epoch if args.unfreeze_epoch >= 0 else None,
+        'stage_b_lr': args.stage_b_lr,
     }
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -853,11 +1086,13 @@ def main():
 
     model = VertebraCornerModel(
         max_vertebrae=config['max_vertebrae'],
-        pretrained=True
+        pretrained=True,
+        pretrained_path=config['pretrained_path'],
     )
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {total_params:,} (trainable: {trainable_params:,})")
+    print(f"Backbone source: {model.backbone_source}")
 
     trainer = VertebraTrainer(model, train_loader, val_loader, device, config)
     trainer.train()
