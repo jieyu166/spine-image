@@ -253,7 +253,12 @@ def process_one(image_path, args, analyzer, output_dir, json_dir):
 
     overlay = draw_overlay(image_rgb, gt_vertebrae, pred_vertebrae, per_vertebra)
     overlay_path = output_dir / f'{image_path.stem}_compare.png'
-    cv2.imwrite(str(overlay_path), overlay)
+    # cv2.imwrite 在 Windows 對非 ASCII 路徑會 fail，改用 imencode + write_bytes
+    ok, buf = cv2.imencode('.png', overlay)
+    if ok:
+        overlay_path.write_bytes(buf.tobytes())
+    else:
+        print(f'  WARN: 無法編碼 overlay PNG')
 
     if summary['mean_distance_px'] is not None:
         print(f'  matched_corners={summary["n_matched_corners"]} '
