@@ -898,7 +898,7 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.2',
+                    'model_version': 'v3.4',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
@@ -911,7 +911,7 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.2',
+                    'model_version': 'v3.4',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
@@ -959,9 +959,16 @@ def get_transforms(is_training=True):
       - CLAHE clip_limit (1, 4) 隨機 (原固定 4.0): 避免永遠過度增強
       - GaussNoise var 10-50 (原 10-80): sensor noise 但不遮蓋結構
     """
+    # V3.4: keep-aspect resize 取代 squash resize
+    # 典型 L-spine 影像 1318x3082 (aspect 2.34) 原本被擠壓進 512x512，垂直方向被
+    # 壓縮 2.34 倍，導致 heatmap Y 精度劣於 X。改成 LongestMaxSize(512)+PadIfNeeded
+    # 後 keypoint X/Y 在 input space 同一物理尺度，Y 系統性偏差會減少。
+    # Albumentations 會自動把 keypoint 隨同 transforms 帶過去（含 pad offset）。
     if is_training:
         return A.Compose([
-            A.Resize(512, 512),
+            A.LongestMaxSize(max_size=512),
+            A.PadIfNeeded(min_height=512, min_width=512,
+                          border_mode=cv2.BORDER_CONSTANT, value=0),
             # 幾何 (保守：椎體朝向應接近原樣)
             A.Rotate(limit=10, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
             A.ShiftScaleRotate(
@@ -978,7 +985,9 @@ def get_transforms(is_training=True):
         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
     else:
         return A.Compose([
-            A.Resize(512, 512),
+            A.LongestMaxSize(max_size=512),
+            A.PadIfNeeded(min_height=512, min_width=512,
+                          border_mode=cv2.BORDER_CONSTANT, value=0),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
