@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
-脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.3
-Spine Vertebra Corner Detection - ML Training Script V3.3
-
-V3.3 改進 (提升定位精度):
-- HEATMAP_SIZE: 128 → 256 (輸出解析度 2×)
-- Decoder 新增 up1 stage，實際產出 256×256 feature map
-  (不是單純 bilinear 放大，是多一個 conv 層讓網路能產生更細的 heatmap)
-- Heatmap sigma: 6 → 3 (搭配解析度提升，實際物理半徑縮小 4 倍，約 12→6 px)
-- 預期：定位誤差從 ~4-5 像素降到 ~2-3 像素
-- 注意：state_dict 新增 up1 key，V3.2 checkpoint 無法直接載入 → 需重新訓練
+脊椎椎體頂點檢測 - 機器學習訓練腳本 V3.2
+Spine Vertebra Corner Detection - ML Training Script V3.2
 
 V3.2 改進 (縮小 domain gap):
 - Backbone 改用 RadImageNet ResNet50 預訓練 (1.35M 放射影像)
@@ -64,9 +56,7 @@ warnings.filterwarnings('ignore')
 
 
 # ── Heatmap 輸出解析度 ──
-# V3.3: 128 → 256，搭配 decoder up1 stage 提升定位精度
-# 單像素物理寬度：512/256 = 2px (V3.2 是 4px) → 亞像素 refine 之後誤差更小
-HEATMAP_SIZE = 256
+HEATMAP_SIZE = 128  # 輸出 128x128 heatmap (比 512 小，減少記憶體)
 
 # ── RadImageNet 預訓練權重 ──
 # V3.2: backbone 改用 RadImageNet (medical image domain) 取代 ImageNet (貓狗車)
@@ -313,11 +303,9 @@ class VertebraDataset(Dataset):
             valid_flags.append(0.0)
 
         # ── 多通道 heatmap: 每個 slot 一個 channel ──
-        # V3.3: sigma=3 on 256×256 (V3.2 是 sigma=6 on 128×128)
-        # 物理半徑：3 * (512/256) = 6 原圖像素 (V3.2 約 24 原圖像素)
-        # 更緊的高斯 → 定位更精確，但 focal loss 要能 handle 更少正樣本
+        # sigma=6: 在 128x128 上產生 ~37x37 像素的高斯，確保足夠正樣本
         heatmaps = self.create_multi_channel_heatmap(
-            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=3
+            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=6
         )
 
         targets = {
@@ -363,12 +351,11 @@ class VertebraDataset(Dataset):
 
         return None
 
-    def create_multi_channel_heatmap(self, keypoints, valid_flags, size, sigma=3):
+    def create_multi_channel_heatmap(self, keypoints, valid_flags, size, sigma=6):
         """每個角點 slot 獨立一個 channel 的高斯熱圖
 
-        V3.3 預設 sigma=3 在 256x256 上產生 ~19 像素直徑的高斯 (3*sigma 半徑)
+        sigma=6 在 128x128 上產生 ~37 像素直徑的高斯 (3*sigma 半徑)
         中心值=1.0，sigma 處值≈0.61，2*sigma 處≈0.14
-        （V3.2 是 sigma=6 on 128x128；物理半徑縮小 4 倍）
         """
         h, w = size
         num_ch = self.num_channels
@@ -528,20 +515,6 @@ class VertebraCornerModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # ── V3.3: up1 decoder stage ──
-        # d2 是 H/4=128×128；上採樣到 H/2=256×256，再過兩層 conv 產生真正的 256 feature
-        # (沒有 encoder skip 可用 — resnet 的 stem maxpool 已把 H/2 feature 丟掉)
-        # 關鍵理由：單純 bilinear interpolate 不會增加資訊，conv 才會讓網路重新學細節
-        self.up1 = nn.Sequential(
-            nn.Conv2d(128, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout2d(0.1),
-            nn.Conv2d(128, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-        )
-
         # ── CoordConv + Channel Embedding heatmap head ──
         # CoordConv 注入 x, y 座標讓模型知道空間位置
         self.coord_conv = CoordConv(128, 64, kernel_size=3, padding=1)
@@ -590,14 +563,8 @@ class VertebraCornerModel(nn.Module):
                     mode='bilinear', align_corners=True)                   # [B, 256, H/4, W/4]
         d2 = self.up2(torch.cat([d2_up, x1], dim=1))                      # [B, 128, H/4, W/4]
 
-        # V3.3 up1: d2 → upsample to H/2 → conv (沒 skip，靠 conv 產生細節)
-        d1_up = torch.nn.functional.interpolate(
-            d2, scale_factor=2, mode='bilinear', align_corners=True
-        )                                                                  # [B, 128, H/2, W/2]
-        d1 = self.up1(d1_up)                                               # [B, 128, H/2, W/2]
-
         # ── CoordConv + Channel Embedding ──
-        feat = self.coord_conv(d1)        # [B, 64, H/2, W/2]
+        feat = self.coord_conv(d2)        # [B, 64, H/4, W/4]
         feat = self.heatmap_relu(self.heatmap_bn(feat))
 
         # Channel embedding: 每個 output channel 用獨特的 embedding 向量
@@ -650,8 +617,7 @@ class FocalLoss(nn.Module):
         pred = pred.clamp(1e-6, 1 - 1e-6)
 
         # 正樣本: 高斯核心區域 (值 > pos_threshold)
-        # V3.3 sigma=3 on 256×256 時，距中心 <=3.75 像素的區域值 > 0.3
-        # 比 V3.2 (sigma=6 on 128) 少 ~4× 正樣本，但仍夠 focal loss 收斂
+        # sigma=6 時，距中心 <=7.5 像素 (1.25*sigma) 的區域值 > 0.3
         pos_mask = target.ge(self.pos_threshold)
         neg_mask = target.lt(self.pos_threshold)
 
@@ -881,7 +847,7 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.3',
+                    'model_version': 'v3.2',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
@@ -894,7 +860,7 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.3',
+                    'model_version': 'v3.2',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
