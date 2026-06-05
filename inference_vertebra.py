@@ -248,8 +248,28 @@ class VertebraInference:
         image = self.load_image(image_path)
         original_h, original_w = image.shape[:2]
 
-        # 預處理
-        resized = cv2.resize(image, (512, 512))
+        # ── 預處理 ──
+        # V3.4 以後改用 keep-aspect resize + pad，與訓練端 LongestMaxSize+PadIfNeeded 一致；
+        # 舊版 V3.0~V3.2 weights 仍用 squash resize 維持相容。
+        use_aspect_aware = str(getattr(self, 'model_version', '')).startswith('v3.4')
+        if use_aspect_aware:
+            scale = 512.0 / max(original_h, original_w)
+            new_h = int(round(original_h * scale))
+            new_w = int(round(original_w * scale))
+            resized_keep = cv2.resize(image, (new_w, new_h))
+            pad_top = (512 - new_h) // 2
+            pad_bottom = 512 - new_h - pad_top
+            pad_left = (512 - new_w) // 2
+            pad_right = 512 - new_w - pad_left
+            resized = cv2.copyMakeBorder(
+                resized_keep, pad_top, pad_bottom, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=(0, 0, 0)
+            )
+        else:
+            resized = cv2.resize(image, (512, 512))
+            scale = None
+            pad_top = pad_left = 0
+
         input_tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
 
         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -276,7 +296,8 @@ class VertebraInference:
         else:
             vertebrae, combined_heatmap, channel_heatmaps = self._decode_v3(
                 predictions, predicted_count, names, boundary,
-                original_w, original_h, confidence_threshold
+                original_w, original_h, confidence_threshold,
+                aspect_scale=scale, pad_top=pad_top, pad_left=pad_left,
             )
 
         # 計算椎體指標
@@ -341,8 +362,13 @@ class VertebraInference:
         return vertebrae, heatmap_tensor, None
 
     def _decode_v3(self, predictions, predicted_count, names, boundary,
-                   orig_w, orig_h, confidence_threshold):
-        """V3 模型: 從多通道 heatmap peak 提取座標"""
+                   orig_w, orig_h, confidence_threshold,
+                   aspect_scale=None, pad_top=0, pad_left=0):
+        """V3 模型: 從多通道 heatmap peak 提取座標
+
+        aspect_scale 非 None 時走 V3.4 keep-aspect 反算 (heatmap → 512 input
+        → 減 pad → 除以 scale → 原圖座標)；否則沿用 squash 模式 (heatmap → 原圖)。
+        """
         heatmaps = torch.sigmoid(predictions['heatmaps'][0]).cpu().numpy()  # [C, H, W]
         hm_h, hm_w = heatmaps.shape[1], heatmaps.shape[2]
 
@@ -375,9 +401,19 @@ class VertebraInference:
                 peak = extract_peaks_from_heatmap(heatmaps[ch_idx], threshold=confidence_threshold)
                 if peak is not None:
                     px, py, conf = peak
+                    if aspect_scale is not None:
+                        # V3.4: heatmap → 512 input → unpad → 除 scale → 原圖
+                        input_x = (px / hm_w) * 512.0
+                        input_y = (py / hm_h) * 512.0
+                        orig_x = (input_x - pad_left) / aspect_scale
+                        orig_y = (input_y - pad_top) / aspect_scale
+                    else:
+                        # V3.0~V3.2: heatmap 直接對應 squash 後的原圖
+                        orig_x = (px / hm_w) * orig_w
+                        orig_y = (py / hm_h) * orig_h
                     corners[corner_name] = {
-                        'x': float((px / hm_w) * orig_w),
-                        'y': float((py / hm_h) * orig_h),
+                        'x': float(orig_x),
+                        'y': float(orig_y),
                     }
                     corner_confidences[corner_name] = float(conf)
 
