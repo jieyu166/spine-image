@@ -223,7 +223,13 @@ class VertebraInference:
                 image = np.stack([image] * 3, axis=-1)
             image = ((image - image.min()) / (image.max() - image.min()) * 255).astype(np.uint8)
         else:
-            image = cv2.imread(image_path)
+            # cv2.imread 在 Windows 對含非 ASCII 字元的路徑 (中文資料夾) 會 fail，
+            # 改走 np.fromfile + imdecode 讓 Python 自己處理 file IO
+            try:
+                buf = np.fromfile(image_path, dtype=np.uint8)
+                image = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+            except Exception:
+                image = None
             if image is None:
                 raise ValueError(f"Cannot read image: {image_path}")
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
