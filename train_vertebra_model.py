@@ -163,12 +163,62 @@ class VertebraDataset(Dataset):
         self.num_channels = max_vertebrae * 4  # 每個角點一個 channel
 
         with open(annotations_file, 'r', encoding='utf-8') as f:
-            self.annotations = json.load(f)
+            raw_annotations = json.load(f)
 
-        if isinstance(self.annotations, dict):
-            self.annotations = [self.annotations]
+        if isinstance(raw_annotations, dict):
+            raw_annotations = [raw_annotations]
 
-        print(f"Loaded {len(self.annotations)} samples (heatmap channels: {self.num_channels})")
+        # 預先解析每個 annotation 的影像實際路徑：
+        # JSON 裡常有 Images\20260218\, Images\v1\ 等陳舊路徑；實際檔案多半 flat 放在 Images/。
+        # 把找不到的樣本直接濾掉，避免訓練時 __getitem__ 不斷 fallback 出 cascade 警告。
+        self.annotations = []
+        dropped = []
+        for ann in raw_annotations:
+            resolved = self._resolve_image_path(ann)
+            if resolved is None:
+                dropped.append(ann.get('image_path') or ann.get('source_file') or '<unknown>')
+                continue
+            ann['_resolved_image_path'] = resolved
+            self.annotations.append(ann)
+
+        print(f"Loaded {len(self.annotations)} samples "
+              f"(heatmap channels: {self.num_channels})")
+        if dropped:
+            print(f"  Dropped {len(dropped)} annotations with missing image files:")
+            for p in dropped[:5]:
+                print(f"    - {p}")
+            if len(dropped) > 5:
+                print(f"    ... 還有 {len(dropped) - 5} 個")
+
+    def _resolve_image_path(self, annotation):
+        """嘗試把 annotation 對到實際存在的影像檔。
+
+        順序：
+        1. 原 image_path（含 data_dir prefix）
+        2. data_dir/Images/<basename(image_path)>，並用 .dcm/.png/.jpg 三種副檔名嘗試
+        3. data_dir/Images/<basename(source_file)>.{dcm,png,jpg}
+        找不到回 None。
+        """
+        image_path = annotation.get('image_path', '')
+        if image_path:
+            full = os.path.join(self.data_dir, image_path)
+            if os.path.exists(full):
+                return full
+
+        candidates = []
+        if image_path:
+            stem = os.path.splitext(os.path.basename(image_path))[0]
+            candidates.append(stem)
+        source_file = annotation.get('source_file', '')
+        if source_file:
+            candidates.append(os.path.splitext(os.path.basename(source_file))[0])
+
+        for stem in candidates:
+            for ext in ['.dcm', '.png', '.jpg', '.jpeg']:
+                cand = os.path.join(self.data_dir, 'Images', stem + ext)
+                if os.path.exists(cand):
+                    return cand
+        return None
 
     def __len__(self):
         return len(self.annotations)
@@ -319,37 +369,38 @@ class VertebraDataset(Dataset):
         return image, targets
 
     def load_image(self, annotation):
-        image_path = annotation.get('image_path', '')
-        full_path = os.path.join(self.data_dir, image_path)
+        # 優先使用 __init__ 預解析過的路徑
+        full_path = annotation.get('_resolved_image_path')
+        if not full_path:
+            full_path = self._resolve_image_path(annotation)
+        if not full_path or not os.path.exists(full_path):
+            return None
 
-        if os.path.exists(full_path):
-            if full_path.lower().endswith('.dcm'):
-                try:
-                    dcm = pydicom.dcmread(full_path)
-                    image = dcm.pixel_array.astype(np.float32)  # float32 避免記憶體爆炸
-                    if len(image.shape) == 2:
-                        image = np.stack([image] * 3, axis=-1)
-                    elif len(image.shape) == 3 and image.shape[2] > 3:
-                        image = image[:, :, :3]
-                    img_min, img_max = image.min(), image.max()
-                    image = ((image - img_min) / (img_max - img_min + 1e-8) * 255).astype(np.uint8)
-                    return image
-                except Exception as e:
-                    print(f"Error loading DICOM {full_path}: {e}")
-            else:
-                image = cv2.imread(full_path)
-                if image is not None:
-                    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if full_path.lower().endswith('.dcm'):
+            try:
+                dcm = pydicom.dcmread(full_path)
+                image = dcm.pixel_array.astype(np.float32)
+                if len(image.shape) == 2:
+                    image = np.stack([image] * 3, axis=-1)
+                elif len(image.shape) == 3 and image.shape[2] > 3:
+                    image = image[:, :, :3]
+                img_min, img_max = image.min(), image.max()
+                image = ((image - img_min) / (img_max - img_min + 1e-8) * 255).astype(np.uint8)
+                return image
+            except Exception as e:
+                print(f"Error loading DICOM {full_path}: {e}")
+                return None
 
-        source_file = annotation.get('source_file', '')
-        if source_file:
-            base_name = os.path.splitext(source_file)[0]
-            for ext in ['.dcm', '.png', '.jpg']:
-                candidate = os.path.join(self.data_dir, base_name + ext)
-                if os.path.exists(candidate):
-                    return self.load_image({'image_path': base_name + ext})
-
-        return None
+        # cv2.imread 在 Windows 對含非 ASCII 字元的路徑 fail，改走 np.fromfile + imdecode
+        try:
+            buf = np.fromfile(full_path, dtype=np.uint8)
+            image = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+        except Exception as e:
+            print(f"Error reading {full_path}: {e}")
+            image = None
+        if image is None:
+            return None
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     def create_multi_channel_heatmap(self, keypoints, valid_flags, size, sigma=6):
         """每個角點 slot 獨立一個 channel 的高斯熱圖
