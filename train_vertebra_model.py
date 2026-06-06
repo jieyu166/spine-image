@@ -834,8 +834,15 @@ class VertebraLoss(nn.Module):
         corner_valid = targets['corner_valid'].to(device)         # [B, max_v, 4]
         max_v = center_pixel_yx.shape[1]
 
+        # V3.5.2: regional offset supervision — 對 GT center 周圍 5×5 區域所有 pixel
+        # 都監督 offset，target 依該 pixel 相對 GT center 的偏移做幾何修正：
+        #   若 GT center 在 (cy, cx)，某 pixel 在 (cy+dy, cx+dx) 被視為 center 時，
+        #   corner 相對該 pixel 的 offset = 原 offset - (dx, dy)
+        # 這樣推論時 NMS 找到的 peak 即使偏 1-2 pixel，offset 仍有有效 supervision，
+        # 不會 collapse 到全圖共用的固定 pattern。
+        REGION_R = 2  # → 5×5 region
         offset_loss_sum = torch.zeros((), device=device)
-        n_valid_corners = 0
+        n_valid_terms = 0
         for b in range(B):
             for v in range(max_v):
                 if center_valid[b, v] < 0.5:
@@ -844,17 +851,27 @@ class VertebraLoss(nn.Module):
                 cx = int(center_pixel_yx[b, v, 1].item())
                 if cy < 0 or cy >= Hm or cx < 0 or cx >= Wm:
                     continue
-                # offset_map[b, :, cy, cx] = [dx0, dy0, dx1, dy1, dx2, dy2, dx3, dy3]
-                pred_offsets_8 = offset_map[b, :, cy, cx]  # [8]
-                pred_offsets_4x2 = pred_offsets_8.view(4, 2)  # [4, 2]
-                tgt_4x2 = corner_offsets_tgt[b, v]              # [4, 2]
-                mask_4 = corner_valid[b, v]                     # [4]
-                # 對 valid corner 算 L1（每個 corner 兩個 axis）
-                diff = (pred_offsets_4x2 - tgt_4x2).abs().sum(dim=-1)  # [4]
-                offset_loss_sum = offset_loss_sum + (diff * mask_4).sum()
-                n_valid_corners = n_valid_corners + int(mask_4.sum().item())
+                tgt_4x2 = corner_offsets_tgt[b, v]   # [4, 2]
+                mask_4 = corner_valid[b, v]          # [4]
 
-        offset_loss = offset_loss_sum / max(n_valid_corners, 1)
+                for dy in range(-REGION_R, REGION_R + 1):
+                    yy = cy + dy
+                    if yy < 0 or yy >= Hm:
+                        continue
+                    for dx in range(-REGION_R, REGION_R + 1):
+                        xx = cx + dx
+                        if xx < 0 or xx >= Wm:
+                            continue
+                        # 該 pixel 視為 center 時的 corner offset
+                        adj = torch.tensor([dx, dy], device=device, dtype=tgt_4x2.dtype)
+                        adjusted_tgt = tgt_4x2 - adj  # broadcast: [4,2] - [2]
+                        pred_8 = offset_map[b, :, yy, xx]
+                        pred_4x2 = pred_8.view(4, 2)
+                        diff = (pred_4x2 - adjusted_tgt).abs().sum(dim=-1)  # [4]
+                        offset_loss_sum = offset_loss_sum + (diff * mask_4).sum()
+                        n_valid_terms = n_valid_terms + int(mask_4.sum().item())
+
+        offset_loss = offset_loss_sum / max(n_valid_terms, 1)
 
         # 3. Count loss
         count_logits = predictions['count_logits']
