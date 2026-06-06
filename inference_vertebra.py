@@ -308,6 +308,16 @@ class VertebraInference:
                 aspect_scale=scale, pad_top=pad_top, pad_left=pad_left,
             )
 
+        # ── Post-process: hard aspect-ratio constraint ──
+        # V3.4 訓練後人工檢視發現「同椎體 4 corner 被學成垂直長條」(PRED aspect 0.5
+        # vs GT ~1.2)，且 V3.5 / V3.6 重訓嘗試 5 輪都無法解。此處不動模型，僅在
+        # 推論後對 4 角點完整的椎體做 hard fix：aspect < 0.7 時，把 width 拉到
+        # 1.2*height (X 軸 scale 圍中心放大)。Y 不動 (Y 是 V3.4 較弱的軸，X 是
+        # 較準的軸，調 X 風險低)。Boundary 椎體只有 2 角點，跳過。
+        self._apply_aspect_fix(vertebrae,
+                               min_aspect=getattr(self, 'aspect_min', 0.7),
+                               target_aspect=getattr(self, 'aspect_target', 1.2))
+
         # 計算椎體指標
         for v in vertebrae:
             self._calculate_metrics(v)
@@ -435,6 +445,36 @@ class VertebraInference:
 
         combined_heatmap = heatmaps.max(axis=0)
         return vertebrae, combined_heatmap, heatmaps
+
+    def _apply_aspect_fix(self, vertebrae, min_aspect=0.7, target_aspect=1.2):
+        """Hard aspect-ratio fix — 對 4 角點完整的椎體，aspect < min_aspect 時
+        把 X 軸圍中心放大到 width = target_aspect * height。
+        Y 軸不動。Boundary 椎體 (2 角點) 跳過。
+        """
+        n_fixed = 0
+        for v in vertebrae:
+            pts = v.get('points', {})
+            if len(pts) < 4:
+                continue
+            xs = [p['x'] for p in pts.values()]
+            ys = [p['y'] for p in pts.values()]
+            cx = sum(xs) / 4.0
+            W = max(xs) - min(xs)
+            H = max(ys) - min(ys)
+            if H <= 0 or W <= 0:
+                continue
+            aspect = W / H
+            if aspect >= min_aspect:
+                continue
+            target_W = target_aspect * H
+            scale_x = target_W / W
+            for p in pts.values():
+                p['x'] = cx + (p['x'] - cx) * scale_x
+            n_fixed += 1
+        if n_fixed > 0:
+            v_aspect = getattr(self, '_aspect_fix_verbose', False)
+            if v_aspect:
+                print(f"  [aspect-fix] adjusted {n_fixed} vertebrae")
 
     def _calculate_metrics(self, vertebra):
         """委託給 spine_metrics 共用模組 (Genant classification)"""
