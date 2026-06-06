@@ -295,9 +295,16 @@ class VertebraInference:
         boundary = BOUNDARY_CONFIG.get(spine_type, {})
 
         # ── 根據模型版本選擇解析方式 ──
+        is_v35 = ('center_map' in predictions) and ('offset_map' in predictions)
         if getattr(self, '_is_v2', False):
             vertebrae, combined_heatmap, channel_heatmaps = self._decode_v2(
                 predictions, predicted_count, names, boundary, original_w, original_h
+            )
+        elif is_v35:
+            vertebrae, combined_heatmap, channel_heatmaps = self._decode_v5(
+                predictions, predicted_count, names, boundary,
+                original_w, original_h, confidence_threshold,
+                aspect_scale=scale, pad_top=pad_top, pad_left=pad_left,
             )
         else:
             vertebrae, combined_heatmap, channel_heatmaps = self._decode_v3(
@@ -433,6 +440,87 @@ class VertebraInference:
 
         combined_heatmap = heatmaps.max(axis=0)
         return vertebrae, combined_heatmap, heatmaps
+
+    def _decode_v5(self, predictions, predicted_count, names, boundary,
+                   orig_w, orig_h, confidence_threshold,
+                   aspect_scale=None, pad_top=0, pad_left=0):
+        """V3.5 CenterNet-style 解碼:
+        1. center_map sigmoid → NMS (3x3 maxpool) → 取 top-predicted_count peaks
+        2. 對每個 center peak (cy, cx) 取 offset_map[:, cy, cx] → 4 corners 相對位置
+        3. center + offset = corner_xy in heatmap coords → 反推 input 512 → unpad → 原圖
+        """
+        center_map = torch.sigmoid(predictions['center_map'][0, 0])  # [H, W]
+        offset_map = predictions['offset_map'][0]                     # [8, H, W]
+        hm_h, hm_w = center_map.shape
+
+        # 3x3 maxpool NMS
+        cm = center_map.unsqueeze(0).unsqueeze(0)
+        pooled = torch.nn.functional.max_pool2d(cm, kernel_size=3, stride=1, padding=1)
+        keep = (cm == pooled) & (cm > confidence_threshold)
+        keep = keep[0, 0]
+
+        flat_scores = center_map[keep]
+        if flat_scores.numel() == 0:
+            return [], center_map.cpu().numpy(), None
+
+        ys, xs = torch.where(keep)
+        peaks = sorted(
+            [(float(center_map[y, x]), int(y), int(x)) for y, x in zip(ys.tolist(), xs.tolist())],
+            key=lambda t: -t[0]
+        )
+
+        # 取 top-N (N=predicted_count)，再按 Y 由小到大排序對應 T12, L1, ..., S1
+        keep_n = min(predicted_count, len(peaks), self.max_vertebrae)
+        peaks_top = peaks[:keep_n]
+        peaks_top.sort(key=lambda t: t[1])  # 上 → 下
+
+        def hm_to_orig(px, py):
+            input_x = (px / hm_w) * 512.0
+            input_y = (py / hm_h) * 512.0
+            if aspect_scale is not None:
+                ox = (input_x - pad_left) / aspect_scale
+                oy = (input_y - pad_top) / aspect_scale
+            else:
+                ox = (px / hm_w) * orig_w
+                oy = (py / hm_h) * orig_h
+            return ox, oy
+
+        vertebrae = []
+        for slot_idx, (score, cy, cx) in enumerate(peaks_top):
+            name = names[slot_idx] if slot_idx < len(names) else f'V{slot_idx+1}'
+            if name in boundary.get('upper', []):
+                boundary_type = 'upper'
+            elif name in boundary.get('lower', []):
+                boundary_type = 'lower'
+            else:
+                boundary_type = None
+
+            offsets_8 = offset_map[:, cy, cx].cpu().numpy()  # [8]: dx0,dy0,dx1,dy1,...
+            corners = {}
+            corner_confidences = {}
+            for j in range(4):
+                # boundary 椎體略過不存在的 corner
+                if boundary_type == 'upper' and j >= 2:
+                    continue
+                if boundary_type == 'lower' and j < 2:
+                    continue
+                dx = float(offsets_8[j * 2])
+                dy = float(offsets_8[j * 2 + 1])
+                cx_corner = cx + dx
+                cy_corner = cy + dy
+                ox, oy = hm_to_orig(cx_corner, cy_corner)
+                corners[CORNER_NAMES[j]] = {'x': ox, 'y': oy}
+                corner_confidences[CORNER_NAMES[j]] = float(score)
+
+            if corners:
+                vertebrae.append({
+                    'name': name,
+                    'boundaryType': boundary_type,
+                    'points': corners,
+                    'confidences': corner_confidences,
+                })
+
+        return vertebrae, center_map.cpu().numpy(), None
 
     def _calculate_metrics(self, vertebra):
         """委託給 spine_metrics 共用模組 (Genant classification)"""

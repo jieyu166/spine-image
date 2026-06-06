@@ -352,16 +352,22 @@ class VertebraDataset(Dataset):
         while len(valid_flags) < max_points:
             valid_flags.append(0.0)
 
-        # ── 多通道 heatmap: 每個 slot 一個 channel ──
-        # sigma=6: 在 128x128 上產生 ~37x37 像素的高斯，確保足夠正樣本
-        heatmaps = self.create_multi_channel_heatmap(
-            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=6
+        # ── V3.5: center heatmap + per-corner offset targets ──
+        # sigma=4 在 128×128 heatmap 上產生 ~25 px 直徑高斯，相當於一節椎體寬度的合理覆蓋
+        (center_heatmap, center_pixel_yx,
+         corner_offsets, center_valid, corner_valid) = self.create_center_offset_targets(
+            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=4
         )
 
         targets = {
             'keypoints': torch.tensor(normalized_kp[:max_points], dtype=torch.float32),
             'valid_mask': torch.tensor(valid_flags[:max_points], dtype=torch.float32),
-            'heatmaps': torch.tensor(heatmaps, dtype=torch.float32),  # [C, H, W]
+            # V3.5 新 targets
+            'center_heatmap':   torch.tensor(center_heatmap, dtype=torch.float32),    # [1, H, W]
+            'center_pixel_yx':  torch.tensor(center_pixel_yx, dtype=torch.long),      # [max_v, 2]
+            'corner_offsets':   torch.tensor(corner_offsets, dtype=torch.float32),    # [max_v, 4, 2]
+            'center_valid':     torch.tensor(center_valid, dtype=torch.float32),      # [max_v]
+            'corner_valid':     torch.tensor(corner_valid, dtype=torch.float32),      # [max_v, 4]
             'num_vertebrae': len(vertebrae),
             'vertebra_names': vertebra_names
         }
@@ -457,6 +463,94 @@ class VertebraDataset(Dataset):
             )
 
         return heatmaps
+
+    def create_center_offset_targets(self, keypoints, valid_flags, size, sigma=4):
+        """V3.5 target 建構: 1-channel center heatmap + 每椎體 center 像素位置 + 每 corner offset
+
+        每個椎體 slot (i ∈ [0, max_vertebrae)):
+        - 取 keypoints[i*4 : i*4+4] 為 4 個 corner，用 valid_flags 過濾有效角點
+        - center = 有效 corner 的算術平均（boundary 椎體只有 2 個 corner 也能算）
+        - center_heatmap 在該 center pixel 畫 gaussian peak（多椎體 max-reduce）
+        - corner_offsets[i, j] = (corner_xy - center_xy) 換到 heatmap pixel 單位
+        - corner_valid[i, j] 標記哪些 corner 真實存在（boundary 椎體只有 2 個 1）
+
+        Args:
+            keypoints: list[[x, y]] in 512×512 image space, length = num_channels
+            valid_flags: list[0/1], length = num_channels
+            size: (H, W) of heatmap
+
+        Returns:
+            center_heatmap: [1, H, W] float32
+            center_pixel_yx: [max_vertebrae, 2] int32 (cy, cx) — invalid slot = (0, 0)
+            corner_offsets:  [max_vertebrae, 4, 2] float32 (dx, dy) in heatmap pixels
+            center_valid:    [max_vertebrae] float32  (1 = vertebra exists)
+            corner_valid:    [max_vertebrae, 4] float32
+        """
+        h, w = size
+        scale_x = w / 512.0
+        scale_y = h / 512.0
+
+        max_vert = self.max_vertebrae
+
+        center_heatmap = np.zeros((1, h, w), dtype=np.float32)
+        center_pixel_yx = np.zeros((max_vert, 2), dtype=np.int32)
+        corner_offsets = np.zeros((max_vert, 4, 2), dtype=np.float32)
+        center_valid = np.zeros((max_vert,), dtype=np.float32)
+        corner_valid = np.zeros((max_vert, 4), dtype=np.float32)
+
+        radius = int(sigma * 3)
+        yy, xx = np.mgrid[-radius:radius + 1, -radius:radius + 1]
+        gaussian_kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma * sigma)).astype(np.float32)
+
+        for i in range(max_vert):
+            base = i * 4
+            # 蒐集該椎體有效 corner 在 512 image space 的座標
+            valid_corner_xy = []
+            for j in range(4):
+                if base + j < len(valid_flags) and valid_flags[base + j] > 0.5:
+                    kp = keypoints[base + j]
+                    valid_corner_xy.append((kp[0], kp[1], j))
+            if not valid_corner_xy:
+                continue
+
+            # center = 有效 corner 算術平均
+            cx_512 = np.mean([c[0] for c in valid_corner_xy])
+            cy_512 = np.mean([c[1] for c in valid_corner_xy])
+            cx_hm = cx_512 * scale_x
+            cy_hm = cy_512 * scale_y
+            cix = int(round(cx_hm))
+            ciy = int(round(cy_hm))
+
+            # 中心超出 heatmap → 跳過此椎體
+            if cix < 0 or cix >= w or ciy < 0 or ciy >= h:
+                continue
+
+            center_valid[i] = 1.0
+            center_pixel_yx[i] = (ciy, cix)
+
+            # 在 center 上畫 gaussian
+            y_min = max(0, ciy - radius)
+            y_max = min(h, ciy + radius + 1)
+            x_min = max(0, cix - radius)
+            x_max = min(w, cix + radius + 1)
+            ky_min = y_min - (ciy - radius)
+            ky_max = ky_min + (y_max - y_min)
+            kx_min = x_min - (cix - radius)
+            kx_max = kx_min + (x_max - x_min)
+            center_heatmap[0, y_min:y_max, x_min:x_max] = np.maximum(
+                center_heatmap[0, y_min:y_max, x_min:x_max],
+                gaussian_kernel[ky_min:ky_max, kx_min:kx_max]
+            )
+
+            # 計算每個 corner offset
+            for (kp_x, kp_y, j) in valid_corner_xy:
+                kp_x_hm = kp_x * scale_x
+                kp_y_hm = kp_y * scale_y
+                corner_offsets[i, j, 0] = kp_x_hm - cx_hm
+                corner_offsets[i, j, 1] = kp_y_hm - cy_hm
+                corner_valid[i, j] = 1.0
+
+        return center_heatmap, center_pixel_yx, corner_offsets, center_valid, corner_valid
 
 
 class CoordConv(nn.Module):
@@ -566,18 +660,34 @@ class VertebraCornerModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # ── CoordConv + Channel Embedding heatmap head ──
+        # ── CoordConv + 共用 backbone for heads ──
         # CoordConv 注入 x, y 座標讓模型知道空間位置
         self.coord_conv = CoordConv(128, 64, kernel_size=3, padding=1)
         self.heatmap_bn = nn.BatchNorm2d(64)
         self.heatmap_relu = nn.ReLU(inplace=True)
 
-        # Channel embedding: 每個 channel 學習一個獨特的空間 bias
-        # 這確保不同 channel 自然傾向於不同空間位置
-        self.channel_embed = nn.Parameter(torch.randn(self.num_channels, 64) * 0.02)
-
-        # 最終 1x1 conv: 64 -> num_channels
-        self.heatmap_final = nn.Conv2d(64, self.num_channels, 1)
+        # ── V3.5: CenterNet-style heads ──
+        # 取代 V3.4 的 32-channel 獨立 corner heatmap（每個 channel 各自學 peak 位置，缺乏跨 channel 幾何約束，
+        # 導致預測椎體被學成垂直長條而非水平方形）。
+        # V3.5 改成：
+        #   center_head:  1 channel heatmap，任何椎體中心點都 peak（NMS 分離 + 按 Y 排序對應 T12~S1）
+        #   offset_head:  8 channel offset map (4 corners × dx/dy)，每像素表達該位置如果是椎體中心，
+        #                 4 個 corner 相對於該中心的 heatmap-pixel offset
+        # 推論時 4 corner = center + offset，幾何 prior 隱含（必圍同一中心、形成合理矩形）
+        self.center_head = nn.Sequential(
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 1, 1),
+        )
+        # 4 corners × (dx, dy) = 8 channel
+        # 順序 = CORNER_NAMES = [anteriorSuperior, posteriorSuperior, posteriorInferior, anteriorInferior]
+        self.offset_head = nn.Sequential(
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 8, 1),
+        )
 
         # 椎體計數 head
         self.count_head = nn.Sequential(
@@ -614,26 +724,22 @@ class VertebraCornerModel(nn.Module):
                     mode='bilinear', align_corners=True)                   # [B, 256, H/4, W/4]
         d2 = self.up2(torch.cat([d2_up, x1], dim=1))                      # [B, 128, H/4, W/4]
 
-        # ── CoordConv + Channel Embedding ──
+        # ── CoordConv 共用 feature ──
         feat = self.coord_conv(d2)        # [B, 64, H/4, W/4]
         feat = self.heatmap_relu(self.heatmap_bn(feat))
 
-        # Channel embedding: 每個 output channel 用獨特的 embedding 向量
-        # 對 feat 做加權求和，讓不同 channel 關注不同的空間特徵
-        # feat: [B, 64, H, W], channel_embed: [num_channels, 64]
-        B, C_feat, H, W = feat.shape
-        feat_flat = feat.view(B, C_feat, -1)                   # [B, 64, H*W]
-        # einsum: 'cf,bfn->bcn' (c=num_channels, f=64, b=batch, n=H*W)
-        heatmaps = torch.einsum('cf,bfn->bcn', self.channel_embed, feat_flat)
-        heatmaps = heatmaps.view(B, self.num_channels, H, W)  # [B, num_channels, H, W]
-
-        # 加上 1x1 conv refinement (捕捉 embedding 無法表達的局部模式)
-        heatmaps = heatmaps + self.heatmap_final(feat)
+        # V3.5: center + offset 兩個 head
+        center_map = self.center_head(feat)    # [B, 1, H/4, W/4] raw logits
+        offset_map = self.offset_head(feat)    # [B, 8, H/4, W/4] in heatmap-pixel units
 
         # 調整到目標大小
-        if heatmaps.shape[2] != HEATMAP_SIZE or heatmaps.shape[3] != HEATMAP_SIZE:
-            heatmaps = torch.nn.functional.interpolate(
-                heatmaps, size=(HEATMAP_SIZE, HEATMAP_SIZE),
+        if center_map.shape[2] != HEATMAP_SIZE or center_map.shape[3] != HEATMAP_SIZE:
+            center_map = torch.nn.functional.interpolate(
+                center_map, size=(HEATMAP_SIZE, HEATMAP_SIZE),
+                mode='bilinear', align_corners=True
+            )
+            offset_map = torch.nn.functional.interpolate(
+                offset_map, size=(HEATMAP_SIZE, HEATMAP_SIZE),
                 mode='bilinear', align_corners=True
             )
 
@@ -641,7 +747,8 @@ class VertebraCornerModel(nn.Module):
         count_logits = self.count_head(x4)
 
         return {
-            'heatmaps': heatmaps,          # [B, C, H, W] raw logits
+            'center_map': center_map,       # [B, 1, H, W] raw logits（sigmoid 後是 center heatmap）
+            'offset_map': offset_map,       # [B, 8, H, W] heatmap-pixel offsets (4 corners × dx,dy)
             'count_logits': count_logits,   # [B, max_vertebrae+1]
         }
 
@@ -686,47 +793,83 @@ class FocalLoss(nn.Module):
 
 
 class VertebraLoss(nn.Module):
-    """椎體頂點檢測損失函數 V3"""
+    """椎體頂點檢測損失函數 V3.5 (CenterNet-style)
 
-    def __init__(self, heatmap_weight=1.0, count_weight=0.5):
+    loss 組成：
+      center_loss:  focal loss on 1-channel center heatmap
+      offset_loss:  L1 on per-corner (dx, dy) sampled at GT center pixels (僅 valid corners)
+      count_loss:   CE on vertebra count head
+    """
+
+    def __init__(self, center_weight=1.0, offset_weight=1.0, count_weight=0.5):
         super(VertebraLoss, self).__init__()
-        self.heatmap_weight = heatmap_weight
+        self.center_weight = center_weight
+        self.offset_weight = offset_weight
         self.count_weight = count_weight
         self.focal = FocalLoss(alpha=2.0, beta=4.0)
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, predictions, targets):
-        # 1. 多通道 heatmap 損失 (只計算有效 channel)
-        pred_heatmaps = torch.sigmoid(predictions['heatmaps'])  # [B, C, H, W]
-        target_heatmaps = targets['heatmaps']                    # [B, C, H, W]
-        valid_mask = targets['valid_mask']                        # [B, C]
+        device = predictions['center_map'].device
 
-        # Resize target 到 pred 大小 (如果不同)
-        if pred_heatmaps.shape[2:] != target_heatmaps.shape[2:]:
-            target_heatmaps = torch.nn.functional.interpolate(
-                target_heatmaps, size=pred_heatmaps.shape[2:],
+        # 1. Center heatmap loss
+        pred_center = torch.sigmoid(predictions['center_map'])  # [B, 1, H, W]
+        tgt_center = targets['center_heatmap'].to(device)        # [B, 1, H, W]
+        if pred_center.shape[2:] != tgt_center.shape[2:]:
+            tgt_center = torch.nn.functional.interpolate(
+                tgt_center, size=pred_center.shape[2:],
                 mode='bilinear', align_corners=True
             )
+        center_loss = self.focal(pred_center, tgt_center)
 
-        # 只計算有效 channel 的損失
-        channel_mask = valid_mask.unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
-        masked_pred = pred_heatmaps * channel_mask
-        masked_target = target_heatmaps * channel_mask
+        # 2. Offset loss — 只在 GT center pixel 取樣，且僅對 valid corner 算 L1
+        offset_map = predictions['offset_map']  # [B, 8, H, W]
+        B, _, Hm, Wm = offset_map.shape
+        center_pixel_yx = targets['center_pixel_yx'].to(device)  # [B, max_v, 2] (cy, cx)
+        corner_offsets_tgt = targets['corner_offsets'].to(device) # [B, max_v, 4, 2]
+        center_valid = targets['center_valid'].to(device)         # [B, max_v]
+        corner_valid = targets['corner_valid'].to(device)         # [B, max_v, 4]
+        max_v = center_pixel_yx.shape[1]
 
-        heatmap_loss = self.focal(masked_pred, masked_target)
+        offset_loss_sum = torch.zeros((), device=device)
+        n_valid_corners = 0
+        for b in range(B):
+            for v in range(max_v):
+                if center_valid[b, v] < 0.5:
+                    continue
+                cy = int(center_pixel_yx[b, v, 0].item())
+                cx = int(center_pixel_yx[b, v, 1].item())
+                if cy < 0 or cy >= Hm or cx < 0 or cx >= Wm:
+                    continue
+                # offset_map[b, :, cy, cx] = [dx0, dy0, dx1, dy1, dx2, dy2, dx3, dy3]
+                pred_offsets_8 = offset_map[b, :, cy, cx]  # [8]
+                pred_offsets_4x2 = pred_offsets_8.view(4, 2)  # [4, 2]
+                tgt_4x2 = corner_offsets_tgt[b, v]              # [4, 2]
+                mask_4 = corner_valid[b, v]                     # [4]
+                # 對 valid corner 算 L1（每個 corner 兩個 axis）
+                diff = (pred_offsets_4x2 - tgt_4x2).abs().sum(dim=-1)  # [4]
+                offset_loss_sum = offset_loss_sum + (diff * mask_4).sum()
+                n_valid_corners = n_valid_corners + int(mask_4.sum().item())
 
-        # 2. 計數損失
+        offset_loss = offset_loss_sum / max(n_valid_corners, 1)
+
+        # 3. Count loss
         count_logits = predictions['count_logits']
-        target_count = torch.tensor([t for t in targets['num_vertebrae']],
-                                   dtype=torch.long, device=count_logits.device)
+        target_count = torch.tensor(list(targets['num_vertebrae']),
+                                    dtype=torch.long, device=device)
         count_loss = self.ce(count_logits, target_count)
 
-        total_loss = self.heatmap_weight * heatmap_loss + self.count_weight * count_loss
+        total_loss = (self.center_weight * center_loss
+                      + self.offset_weight * offset_loss
+                      + self.count_weight * count_loss)
 
         return {
-            'total_loss': total_loss,
-            'heatmap_loss': heatmap_loss,
-            'count_loss': count_loss
+            'total_loss':   total_loss,
+            'center_loss':  center_loss,
+            'offset_loss':  offset_loss,
+            'count_loss':   count_loss,
+            # 保留舊 key 名以免 trainer 日誌爆掉
+            'heatmap_loss': center_loss,
         }
 
 
@@ -812,7 +955,9 @@ class VertebraTrainer:
     def train_epoch(self):
         self.model.train()
         total_loss = 0
-        components = {'heatmap_loss': 0, 'count_loss': 0}
+        # V3.5 tracks center / offset 分離；heatmap_loss 是 center_loss 的別名（向下相容）
+        components = {'heatmap_loss': 0, 'center_loss': 0,
+                      'offset_loss': 0, 'count_loss': 0}
 
         progress = tqdm(self.train_loader, desc='Training')
         for images, targets in progress:
@@ -834,7 +979,8 @@ class VertebraTrainer:
 
             progress.set_postfix({
                 'Loss': f"{losses['total_loss'].item():.4f}",
-                'HM': f"{losses['heatmap_loss'].item():.4f}"
+                'C': f"{losses['center_loss'].item():.4f}",
+                'O': f"{losses['offset_loss'].item():.4f}"
             })
 
         n = len(self.train_loader)
@@ -843,7 +989,8 @@ class VertebraTrainer:
     def validate(self):
         self.model.eval()
         total_loss = 0
-        components = {'heatmap_loss': 0, 'count_loss': 0}
+        components = {'heatmap_loss': 0, 'center_loss': 0,
+                      'offset_loss': 0, 'count_loss': 0}
 
         with torch.no_grad():
             progress = tqdm(self.val_loader, desc='Validation')
@@ -887,7 +1034,8 @@ class VertebraTrainer:
             self.val_losses.append(val_loss)
 
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-            print(f"  Heatmap: T={train_comp['heatmap_loss']:.4f} V={val_comp['heatmap_loss']:.4f}")
+            print(f"  Center:  T={train_comp['center_loss']:.4f} V={val_comp['center_loss']:.4f}")
+            print(f"  Offset:  T={train_comp['offset_loss']:.4f} V={val_comp['offset_loss']:.4f}")
             print(f"  Count:   T={train_comp['count_loss']:.4f} V={val_comp['count_loss']:.4f}")
 
             if val_loss < self.best_val_loss:
@@ -898,7 +1046,7 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.5',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
@@ -911,7 +1059,7 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.5',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
@@ -995,32 +1143,25 @@ def get_transforms(is_training=True):
 
 def collate_fn(batch):
     images = []
-    targets = {
-        'keypoints': [],
-        'valid_mask': [],
-        'heatmaps': [],
-        'num_vertebrae': [],
-        'vertebra_names': []
-    }
+    stack_keys = ['keypoints', 'valid_mask',
+                  'center_heatmap', 'center_pixel_yx',
+                  'corner_offsets', 'center_valid', 'corner_valid']
+    stacked = {k: [] for k in stack_keys}
+    num_vertebrae = []
+    vertebra_names = []
 
     for image, target in batch:
         images.append(image)
-        targets['keypoints'].append(target['keypoints'])
-        targets['valid_mask'].append(target['valid_mask'])
-        targets['heatmaps'].append(target['heatmaps'])
-        targets['num_vertebrae'].append(target['num_vertebrae'])
-        targets['vertebra_names'].append(target['vertebra_names'])
+        for k in stack_keys:
+            stacked[k].append(target[k])
+        num_vertebrae.append(target['num_vertebrae'])
+        vertebra_names.append(target['vertebra_names'])
 
-    return (
-        torch.stack(images, 0),
-        {
-            'keypoints': torch.stack(targets['keypoints'], 0),
-            'valid_mask': torch.stack(targets['valid_mask'], 0),
-            'heatmaps': torch.stack(targets['heatmaps'], 0),
-            'num_vertebrae': targets['num_vertebrae'],
-            'vertebra_names': targets['vertebra_names']
-        }
-    )
+    out = {k: torch.stack(v, 0) for k, v in stacked.items()}
+    out['num_vertebrae'] = num_vertebrae
+    out['vertebra_names'] = vertebra_names
+
+    return torch.stack(images, 0), out
 
 
 def parse_args():
