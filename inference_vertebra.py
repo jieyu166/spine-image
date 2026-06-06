@@ -257,7 +257,9 @@ class VertebraInference:
         # ── 預處理 ──
         # V3.4 以後改用 keep-aspect resize + pad，與訓練端 LongestMaxSize+PadIfNeeded 一致；
         # 舊版 V3.0~V3.2 weights 仍用 squash resize 維持相容。
-        use_aspect_aware = str(getattr(self, 'model_version', '')).startswith('v3.4')
+        # V3.4 / V3.6 (geometric consistency) 都用 keep-aspect resize + pad
+        _mv = str(getattr(self, 'model_version', ''))
+        use_aspect_aware = _mv.startswith('v3.4') or _mv.startswith('v3.6')
         if use_aspect_aware:
             scale = 512.0 / max(original_h, original_w)
             new_h = int(round(original_h * scale))

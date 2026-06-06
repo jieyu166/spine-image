@@ -685,13 +685,47 @@ class FocalLoss(nn.Module):
         return loss
 
 
-class VertebraLoss(nn.Module):
-    """椎體頂點檢測損失函數 V3"""
+def soft_argmax_2d(heatmaps, temperature=1.0):
+    """對每個 channel 計算可微分的 peak (x, y) 位置 (heatmap pixel coords)
 
-    def __init__(self, heatmap_weight=1.0, count_weight=0.5):
+    輸入 [B, C, H, W] sigmoid 後的 heatmap
+    回傳 [B, C, 2] 內含 (x, y) 浮點座標
+    """
+    B, C, H, W = heatmaps.shape
+    # spatial softmax，平坦後 normalize
+    flat = heatmaps.view(B, C, -1) / max(temperature, 1e-6)
+    weights = torch.softmax(flat, dim=-1)
+    weights = weights.view(B, C, H, W)
+
+    device = heatmaps.device
+    ys = torch.arange(H, device=device, dtype=heatmaps.dtype).view(1, 1, H, 1)
+    xs = torch.arange(W, device=device, dtype=heatmaps.dtype).view(1, 1, 1, W)
+    x = (weights * xs).sum(dim=(2, 3))  # [B, C]
+    y = (weights * ys).sum(dim=(2, 3))  # [B, C]
+    return torch.stack([x, y], dim=-1)   # [B, C, 2]
+
+
+class VertebraLoss(nn.Module):
+    """椎體頂點檢測損失函數 V3.6
+
+    V3.6 新增 geometric consistency loss:
+    penalize 預測椎體的「相對 4 corner 形狀」與 GT 不符 — 修 V3.4 觀察到
+    的「預測椎體被學成垂直長條而非水平方形」副作用 (PRED aspect 0.58 vs
+    GT 1.17)。實作: soft-argmax 取出每個 channel 的 peak 位置，每節椎體
+    用 4 corner 減去自己中心點得 relative shape，與 GT relative shape 算 MSE。
+
+    L_total = heatmap_weight * focal(corner_heatmap) +
+              geom_weight    * mse(pred_relative_corners - gt_relative_corners) +
+              count_weight   * ce(count)
+    """
+
+    def __init__(self, heatmap_weight=1.0, geom_weight=0.5, count_weight=0.5,
+                 max_vertebrae=8):
         super(VertebraLoss, self).__init__()
         self.heatmap_weight = heatmap_weight
+        self.geom_weight = geom_weight
         self.count_weight = count_weight
+        self.max_vertebrae = max_vertebrae
         self.focal = FocalLoss(alpha=2.0, beta=4.0)
         self.ce = nn.CrossEntropyLoss()
 
@@ -715,18 +749,52 @@ class VertebraLoss(nn.Module):
 
         heatmap_loss = self.focal(masked_pred, masked_target)
 
-        # 2. 計數損失
+        # 2. Geometric consistency loss
+        # soft-argmax 取每 channel 預測位置 (heatmap pixel space)
+        pred_xy_hm = soft_argmax_2d(pred_heatmaps, temperature=0.5)  # [B, C, 2]
+        B, C, _ = pred_xy_hm.shape
+        # GT keypoints 是 [0,1] normalized → 換到 heatmap pixel space
+        Hm, Wm = pred_heatmaps.shape[2], pred_heatmaps.shape[3]
+        gt_xy_hm = targets['keypoints'].clone()  # [B, C, 2] in [0,1]
+        gt_xy_hm[..., 0] = gt_xy_hm[..., 0] * Wm
+        gt_xy_hm[..., 1] = gt_xy_hm[..., 1] * Hm
+
+        # reshape to per-vertebra: [B, max_v, 4, 2]
+        max_v = self.max_vertebrae
+        pred_v = pred_xy_hm.view(B, max_v, 4, 2)
+        gt_v = gt_xy_hm.view(B, max_v, 4, 2)
+        valid_v = valid_mask.view(B, max_v, 4)  # [B, max_v, 4]
+
+        # 對 valid corner 計算 weighted mean center (避免無效 corner 拉偏中心)
+        # safe denom
+        n_valid_per_vert = valid_v.sum(dim=-1, keepdim=True).clamp(min=1.0)  # [B, max_v, 1]
+        pred_center = (pred_v * valid_v.unsqueeze(-1)).sum(dim=2) / n_valid_per_vert  # [B, max_v, 2]
+        gt_center = (gt_v * valid_v.unsqueeze(-1)).sum(dim=2) / n_valid_per_vert
+        pred_rel = pred_v - pred_center.unsqueeze(2)  # [B, max_v, 4, 2]
+        gt_rel = gt_v - gt_center.unsqueeze(2)
+        # 只在 valid corner 算 MSE，且整椎體至少要有 2 個 valid corner (boundary 椎體) 才意義
+        vert_has_geom = (valid_v.sum(dim=-1) >= 2).float()  # [B, max_v]
+        per_corner_sq = ((pred_rel - gt_rel) ** 2).sum(dim=-1)  # [B, max_v, 4]
+        per_vert_geom = (per_corner_sq * valid_v).sum(dim=-1) / n_valid_per_vert.squeeze(-1)  # [B, max_v]
+        geom_loss_sum = (per_vert_geom * vert_has_geom).sum()
+        n_geom_verts = vert_has_geom.sum().clamp(min=1.0)
+        geom_loss = geom_loss_sum / n_geom_verts
+
+        # 3. 計數損失
         count_logits = predictions['count_logits']
         target_count = torch.tensor([t for t in targets['num_vertebrae']],
                                    dtype=torch.long, device=count_logits.device)
         count_loss = self.ce(count_logits, target_count)
 
-        total_loss = self.heatmap_weight * heatmap_loss + self.count_weight * count_loss
+        total_loss = (self.heatmap_weight * heatmap_loss
+                      + self.geom_weight * geom_loss
+                      + self.count_weight * count_loss)
 
         return {
-            'total_loss': total_loss,
+            'total_loss':   total_loss,
             'heatmap_loss': heatmap_loss,
-            'count_loss': count_loss
+            'geom_loss':    geom_loss,
+            'count_loss':   count_loss,
         }
 
 
@@ -812,7 +880,7 @@ class VertebraTrainer:
     def train_epoch(self):
         self.model.train()
         total_loss = 0
-        components = {'heatmap_loss': 0, 'count_loss': 0}
+        components = {'heatmap_loss': 0, 'geom_loss': 0, 'count_loss': 0}
 
         progress = tqdm(self.train_loader, desc='Training')
         for images, targets in progress:
@@ -834,7 +902,8 @@ class VertebraTrainer:
 
             progress.set_postfix({
                 'Loss': f"{losses['total_loss'].item():.4f}",
-                'HM': f"{losses['heatmap_loss'].item():.4f}"
+                'HM': f"{losses['heatmap_loss'].item():.4f}",
+                'G': f"{losses['geom_loss'].item():.4f}"
             })
 
         n = len(self.train_loader)
@@ -843,7 +912,7 @@ class VertebraTrainer:
     def validate(self):
         self.model.eval()
         total_loss = 0
-        components = {'heatmap_loss': 0, 'count_loss': 0}
+        components = {'heatmap_loss': 0, 'geom_loss': 0, 'count_loss': 0}
 
         with torch.no_grad():
             progress = tqdm(self.val_loader, desc='Validation')
@@ -888,6 +957,7 @@ class VertebraTrainer:
 
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             print(f"  Heatmap: T={train_comp['heatmap_loss']:.4f} V={val_comp['heatmap_loss']:.4f}")
+            print(f"  Geom:    T={train_comp['geom_loss']:.4f} V={val_comp['geom_loss']:.4f}")
             print(f"  Count:   T={train_comp['count_loss']:.4f} V={val_comp['count_loss']:.4f}")
 
             if val_loss < self.best_val_loss:
@@ -898,7 +968,7 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.6',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
@@ -911,7 +981,7 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.6',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
