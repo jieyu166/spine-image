@@ -313,8 +313,8 @@ class VertebraInference:
         # 1.2*height (X 軸 scale 圍中心放大)。Y 不動 (Y 是 V3.4 較弱的軸，X 是
         # 較準的軸，調 X 風險低)。Boundary 椎體只有 2 角點，跳過。
         self._apply_aspect_fix(vertebrae,
-                               min_aspect=getattr(self, 'aspect_min', 0.7),
-                               target_aspect=getattr(self, 'aspect_target', 1.2))
+                               min_aspect=getattr(self, 'aspect_min', 0.9),
+                               max_scale=getattr(self, 'aspect_max_scale', 1.6))
 
         # 計算椎體指標
         for v in vertebrae:
@@ -444,10 +444,15 @@ class VertebraInference:
         combined_heatmap = heatmaps.max(axis=0)
         return vertebrae, combined_heatmap, heatmaps
 
-    def _apply_aspect_fix(self, vertebrae, min_aspect=0.7, target_aspect=1.2):
+    def _apply_aspect_fix(self, vertebrae, min_aspect=0.9, max_scale=1.6):
         """Hard aspect-ratio fix — 對 4 角點完整的椎體，aspect < min_aspect 時
-        把 X 軸圍中心放大到 width = target_aspect * height。
+        X 軸圍中心放大到「剛好達到 min_aspect」（不是固定 target，避免過度修正）。
+        額外加 max_scale 上限避免極端 case 推太遠。
         Y 軸不動。Boundary 椎體 (2 角點) 跳過。
+
+        Args:
+            min_aspect: aspect (W/H) 下限門檻，原 aspect 低於此就修
+            max_scale: X 軸 scale 上限，避免極端拉伸 (e.g. aspect=0.3 不會被推成 3x)
         """
         n_fixed = 0
         for v in vertebrae:
@@ -464,8 +469,9 @@ class VertebraInference:
             aspect = W / H
             if aspect >= min_aspect:
                 continue
-            target_W = target_aspect * H
-            scale_x = target_W / W
+            # 只拉到剛好達門檻 = min_aspect * H，且 scale 不超過 max_scale
+            target_W = min_aspect * H
+            scale_x = min(target_W / W, max_scale)
             for p in pts.values():
                 p['x'] = cx + (p['x'] - cx) * scale_x
             n_fixed += 1
