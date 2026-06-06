@@ -453,9 +453,10 @@ class VertebraInference:
         offset_map = predictions['offset_map'][0]                     # [8, H, W]
         hm_h, hm_w = center_map.shape
 
-        # 3x3 maxpool NMS
+        # 5x5 maxpool NMS — 椎體間距在 128 heatmap 上 ~10 px，5x5 確保相鄰椎體
+        # peak 不會互相抑制，但能合併同椎體內 1~2 px 的雙峰
         cm = center_map.unsqueeze(0).unsqueeze(0)
-        pooled = torch.nn.functional.max_pool2d(cm, kernel_size=3, stride=1, padding=1)
+        pooled = torch.nn.functional.max_pool2d(cm, kernel_size=5, stride=1, padding=2)
         keep = (cm == pooled) & (cm > confidence_threshold)
         keep = keep[0, 0]
 

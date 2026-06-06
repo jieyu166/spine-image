@@ -353,10 +353,13 @@ class VertebraDataset(Dataset):
             valid_flags.append(0.0)
 
         # ── V3.5: center heatmap + per-corner offset targets ──
-        # sigma=4 在 128×128 heatmap 上產生 ~25 px 直徑高斯，相當於一節椎體寬度的合理覆蓋
+        # sigma=2 在 128×128 heatmap 上產生 ~13 px 直徑高斯，比相鄰椎體間距 (~10 px) 還大一些，
+        # 但 V3.5.1 比 V3.5 原本的 sigma=4 (25 px 直徑) 改善很多 — sigma=4 會讓 7 節椎體
+        # 的 center gaussian 完全融合成一條長帶，模型學成「整段脊柱都是 center」，
+        # NMS 抓不到 7 個離散 peak。改 sigma=2 + 推論端 5×5 NMS kernel 一起解。
         (center_heatmap, center_pixel_yx,
          corner_offsets, center_valid, corner_valid) = self.create_center_offset_targets(
-            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=4
+            transformed_kp, valid_flags, (HEATMAP_SIZE, HEATMAP_SIZE), sigma=2
         )
 
         targets = {
