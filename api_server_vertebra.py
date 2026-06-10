@@ -196,6 +196,10 @@ async def predict(
             "image_info": result['image_info'],
             "predicted_count": result['predicted_count'],
             "count_confidence": round(result['count_confidence'], 4),
+            # 可信度旗標：low_confidence=True 表示建議人工完整複查
+            "corner_confidence_min": round(result.get('corner_confidence_min', 0.0), 4),
+            "corner_confidence_avg": round(result.get('corner_confidence_avg', 0.0), 4),
+            "low_confidence": bool(result.get('low_confidence', False)),
             "vertebrae": result['vertebrae'],
             "discs": result['discs'],
             "original_image": encode_image_base64(original_bgr),
