@@ -359,12 +359,28 @@ class VertebraInference:
         # 計算椎間盤指標
         discs = self._calculate_discs(vertebrae, spine_type)
 
+        # ── 可信度旗標 ──
+        # 實測 corner_min（所有角點 confidence 的最小值）與定位誤差相關 -0.68：
+        # 好案例 corner_min ~0.67-0.69，定位失敗案例 ~0.33-0.43。低於門檻時標記
+        # 「需人工複查」。不改座標，僅提供臨床 triage 訊號（剩餘 catastrophe 屬
+        # 模型在難圖上的真實失敗、無法後處理修正，標記它們是負責任的作法）。
+        all_confs = []
+        for v in vertebrae:
+            all_confs += list(v.get('confidences', {}).values())
+        corner_min = float(min(all_confs)) if all_confs else 0.0
+        corner_avg = float(np.mean(all_confs)) if all_confs else 0.0
+        reliability_threshold = getattr(self, 'reliability_threshold', 0.5)
+        low_confidence = corner_min < reliability_threshold
+
         return {
             'image_path': str(image_path),
             'spine_type': spine_type,
             'image_info': {'width': original_w, 'height': original_h},
             'predicted_count': predicted_count,
             'count_confidence': count_confidence,
+            'corner_confidence_min': corner_min,
+            'corner_confidence_avg': corner_avg,
+            'low_confidence': low_confidence,   # True = 建議人工完整複查
             'vertebrae': vertebrae,
             'discs': discs,
             'heatmap': combined_heatmap,
