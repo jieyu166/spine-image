@@ -188,6 +188,27 @@ class VertebraInference:
         print(f"Model V{self.model_version} loaded (epoch {epoch}{suffix})")
 
         # ── Ensemble：載入額外權重（須與主模型同架構 V3）──
+        # 若未明確指定 ensemble_paths，自動偵測 sidecar 檔 "<model_path>.ensemble"
+        # （純文字，每行一個權重路徑，# 開頭為註解）。這樣 api_server / colab /
+        # compare_annotations 不必改 code 即可用 ensemble — 只要把 sidecar 放好。
+        if ensemble_paths is None:
+            sidecar = str(model_path) + '.ensemble'
+            if os.path.isfile(sidecar):
+                base_dir = os.path.dirname(os.path.abspath(model_path))
+                paths = []
+                with open(sidecar, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        # 相對路徑以主模型所在資料夾為基準
+                        paths.append(line if os.path.isabs(line)
+                                     else os.path.join(base_dir, line))
+                if paths:
+                    ensemble_paths = paths
+                    print(f"  [ensemble] 自動載入 sidecar: {os.path.basename(sidecar)} "
+                          f"({len(paths)} 個成員)")
+
         self.ensemble_models = []
         if ensemble_paths:
             for p in ensemble_paths:
