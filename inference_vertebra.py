@@ -66,16 +66,30 @@ CORNER_COLORS = [
 ]
 
 
-def extract_peaks_from_heatmap(heatmap, threshold=0.3):
+def extract_peaks_from_heatmap(heatmap, threshold=0.3, blur_sigma=6.0, blur_ksize=15):
     """從單通道 heatmap 提取 peak 座標 (sub-pixel 精度)
+
+    DARK-style decode：取峰前先對 heatmap 做 Gaussian 平滑，把多模/雜訊的
+    argmax 正規化到真實高斯質心。在 128 heatmap 上 1 px ≈ 原圖 24 px，去噪後
+    argmax 更貼近真值，定位精度大幅提升。blur_sigma 預設對齊訓練 label 的
+    sigma=6（DARK 理論：decode kernel 應匹配 label kernel）。每個 corner 是
+    獨立 channel，blur 不會污染相鄰椎體。
 
     Args:
         heatmap: [H, W] numpy array, sigmoid 後的值 (0~1)
         threshold: peak 最低信心度
+        blur_sigma: 取峰前 Gaussian 平滑 sigma (<=0 關閉)
+        blur_ksize: Gaussian kernel 大小 (奇數)
 
     Returns:
         (x, y, confidence) 或 None
     """
+    if blur_sigma and blur_sigma > 0:
+        k = int(blur_ksize)
+        if k % 2 == 0:
+            k += 1
+        heatmap = cv2.GaussianBlur(heatmap, (k, k), blur_sigma)
+
     if heatmap.max() < threshold:
         return None
 
@@ -539,7 +553,11 @@ class VertebraInference:
                 if ch_idx >= heatmaps.shape[0]:
                     continue
 
-                peak = extract_peaks_from_heatmap(heatmaps[ch_idx], threshold=confidence_threshold)
+                peak = extract_peaks_from_heatmap(
+                    heatmaps[ch_idx], threshold=confidence_threshold,
+                    blur_sigma=getattr(self, 'decode_blur_sigma', 6.0),
+                    blur_ksize=getattr(self, 'decode_blur_ksize', 15),
+                )
                 if peak is not None:
                     px, py, conf = peak
                     if aspect_scale is not None:
