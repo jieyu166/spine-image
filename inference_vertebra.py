@@ -44,6 +44,16 @@ BOUNDARY_CONFIG = {
     'C': {'upper': ['T1'], 'lower': ['C2']},
 }
 
+# 命名錨定方向：解碼出 N 節椎體後，從哪一端開始對應解剖名稱
+#   'bottom' = 從清單尾端往回取 names[-N:]（最底那節 = 清單最後一個）
+#   'top'    = 從清單開頭取 names[:N]（最頂那節 = 清單第一個）
+# L-spine：薦椎 S1 幾乎必入鏡且解剖最穩定，頂端常被裁切 → 從 S1 往上錨定
+# C-spine：C2 齒突最明顯且通常入鏡，T1 常被肩膀擋住 → 從 C2 往下錨定
+ANCHOR_CONFIG = {
+    'L': 'bottom',
+    'C': 'top',
+}
+
 # 4 個角點名稱 (固定順序)
 CORNER_NAMES = ['anteriorSuperior', 'posteriorSuperior', 'posteriorInferior', 'anteriorInferior']
 
@@ -294,14 +304,22 @@ class VertebraInference:
         names = VERTEBRA_NAMES.get(spine_type, VERTEBRA_NAMES['L'])
         boundary = BOUNDARY_CONFIG.get(spine_type, {})
 
+        # ── 命名錨定：把「第 i 個解碼 slot（由上而下）」對應到解剖名稱 ──
+        # 模型的 32 channel 是 top-down 位置 slot（slot 0 = 最頂那節）。命名若一律
+        # 從 T12 起算，當影像沒有 T12（頂端被裁）但 count 數多 1 時，整條序列往下
+        # 錯位一格 → catastrophe（如 81161252、21584353，mean 700-800px）。
+        # 改成依 spine_type 從穩定端錨定（L 從 S1、C 從 C2）。
+        anchor = getattr(self, 'anchor_mode', None) or ANCHOR_CONFIG.get(spine_type, 'bottom')
+        slot_names = self._assign_slot_names(names, predicted_count, anchor)
+
         # ── 根據模型版本選擇解析方式 ──
         if getattr(self, '_is_v2', False):
             vertebrae, combined_heatmap, channel_heatmaps = self._decode_v2(
-                predictions, predicted_count, names, boundary, original_w, original_h
+                predictions, predicted_count, slot_names, boundary, original_w, original_h
             )
         else:
             vertebrae, combined_heatmap, channel_heatmaps = self._decode_v3(
-                predictions, predicted_count, names, boundary,
+                predictions, predicted_count, slot_names, boundary,
                 original_w, original_h, confidence_threshold,
                 aspect_scale=scale, pad_top=pad_top, pad_left=pad_left,
             )
@@ -336,14 +354,33 @@ class VertebraInference:
             'original_image': image,
         }
 
-    def _decode_v2(self, predictions, predicted_count, names, boundary, orig_w, orig_h):
+    def _assign_slot_names(self, names, count, anchor='bottom'):
+        """把解碼 slot（由上而下，slot 0 = 最頂那節）對應到解剖名稱清單。
+
+        anchor='bottom'：取 names[-count:]（最底那節 = 清單最後一個，如 S1）
+        anchor='top'   ：取 names[:count]（最頂那節 = 清單第一個，如 T12 / C2）
+
+        count 超過清單長度時，多出來的 slot 命名為 V{n}。
+        """
+        count = max(0, int(count))
+        n = len(names)
+        if count <= n:
+            window = list(names[-count:]) if (anchor == 'bottom' and count > 0) else list(names[:count])
+        else:
+            # 偵測到的椎體比清單還多（理論上少見）：以清單為基礎，超出部分補 V{n}
+            base = list(names)
+            extra = [f'V{n + k + 1}' for k in range(count - n)]
+            window = base + extra if anchor == 'top' else extra + base
+        return window
+
+    def _decode_v2(self, predictions, predicted_count, slot_names, boundary, orig_w, orig_h):
         """V2 模型: 從回歸分支的 normalized coords 解析"""
         coords = predictions['coords'][0].cpu().numpy()  # [N*4, 2] normalized [0,1]
         heatmap_tensor = predictions['heatmap'][0, 0].cpu().numpy()  # [H, W]
 
         vertebrae = []
         for i in range(min(predicted_count, self.max_vertebrae)):
-            name = names[i] if i < len(names) else f'V{i+1}'
+            name = slot_names[i] if i < len(slot_names) else f'V{i+1}'
             base_idx = i * 4
 
             if name in boundary.get('upper', []):
@@ -377,7 +414,7 @@ class VertebraInference:
 
         return vertebrae, heatmap_tensor, None
 
-    def _decode_v3(self, predictions, predicted_count, names, boundary,
+    def _decode_v3(self, predictions, predicted_count, slot_names, boundary,
                    orig_w, orig_h, confidence_threshold,
                    aspect_scale=None, pad_top=0, pad_left=0):
         """V3 模型: 從多通道 heatmap peak 提取座標
@@ -390,7 +427,7 @@ class VertebraInference:
 
         vertebrae = []
         for i in range(min(predicted_count, self.max_vertebrae)):
-            name = names[i] if i < len(names) else f'V{i+1}'
+            name = slot_names[i] if i < len(slot_names) else f'V{i+1}'
             base_idx = i * 4
 
             if name in boundary.get('upper', []):
