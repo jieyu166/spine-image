@@ -286,18 +286,22 @@ class VertebraInference:
             scale = None
             pad_top = pad_left = 0
 
-        input_tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
-
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        input_tensor = (input_tensor - mean) / std
-        input_tensor = input_tensor.unsqueeze(0).to(self.device)
-
-        # 推理
-        with torch.no_grad():
-            predictions = self.model(input_tensor)
-
-        count_logits = predictions['count_logits'][0].cpu().numpy()
+        # ── 推理（V3 模型支援 TTA；V2 走單次 forward）──
+        tta_enabled = (not getattr(self, '_is_v2', False)) and getattr(self, 'tta', True)
+        if tta_enabled:
+            # 在機率空間平均多個變體（旋轉變體會把 heatmap 逆旋轉回正規座標），
+            # 再轉回 logit 餵給既有 decode（decode 內部會再 sigmoid）。
+            prob, count_logits = self._predict_heatmaps_tta(resized)
+            eps = 1e-6
+            probc = np.clip(prob, eps, 1.0 - eps)
+            logit = np.log(probc / (1.0 - probc)).astype(np.float32)
+            predictions = {
+                'heatmaps': torch.from_numpy(logit).unsqueeze(0).to(self.device),
+                'count_logits': torch.from_numpy(count_logits.astype(np.float32)).unsqueeze(0).to(self.device),
+            }
+        else:
+            predictions = self._forward_normalized(resized)
+            count_logits = predictions['count_logits'][0].cpu().numpy()
         predicted_count = int(np.argmax(count_logits))
         count_confidence = float(np.exp(count_logits[predicted_count]) / np.exp(count_logits).sum())
 
@@ -353,6 +357,90 @@ class VertebraInference:
             'channel_heatmaps': channel_heatmaps,
             'original_image': image,
         }
+
+    # ── TTA 共用前處理常數 ──
+    _IMNET_MEAN = (0.485, 0.456, 0.406)
+    _IMNET_STD = (0.229, 0.224, 0.225)
+
+    def _forward_normalized(self, resized):
+        """把 aspect-aware 512×512 影像 (HxWx3, 0-255) normalize 後 forward 一次。
+        回傳模型原始 predictions dict。
+        """
+        t = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
+        mean = torch.tensor(self._IMNET_MEAN).view(3, 1, 1)
+        std = torch.tensor(self._IMNET_STD).view(3, 1, 1)
+        t = (t - mean) / std
+        t = t.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            return self.model(t)
+
+    def _tta_ops(self):
+        """回傳 TTA 變體清單。可用 inf.tta_ops 覆寫。
+
+        每個元素：('identity',) / ('rot', 角度) / ('photo', 對比因子)
+        預設保守組合，對齊訓練 aug (Rotate ±10°, brightness ±15%)，
+        不含水平翻轉 (lateral spine 前後方向有醫學意義)。
+        """
+        custom = getattr(self, 'tta_ops', None)
+        if custom:
+            return custom
+        return [('identity',), ('rot', 6.0), ('rot', -6.0),
+                ('photo', 0.85), ('photo', 1.15)]
+
+    def _predict_heatmaps_tta(self, resized):
+        """對多個 TTA 變體 forward，於機率空間平均。
+        旋轉變體會把輸出 heatmap 逆旋轉回正規座標再累加。
+
+        回傳 (avg_prob[C,h,w] np.float32, avg_count_logits[K] np.float32)
+        """
+        h, w = resized.shape[:2]
+        acc_prob = None
+        nv = 0
+        identity_clog = None  # count 只取 identity 那次，不被旋轉/亮度變體擾動
+        for op in self._tta_ops():
+            kind = op[0]
+            if kind == 'identity':
+                img = resized
+                inv_angle = None
+            elif kind == 'rot':
+                ang = float(op[1])
+                M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
+                img = cv2.warpAffine(resized, M, (w, h),
+                                     flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REFLECT_101)
+                inv_angle = -ang
+            elif kind == 'photo':
+                f = float(op[1])
+                img = np.clip(resized.astype(np.float32) * f, 0, 255)
+                inv_angle = None
+            else:
+                continue
+
+            pred = self._forward_normalized(img)
+            prob = torch.sigmoid(pred['heatmaps'][0]).cpu().numpy().astype(np.float32)  # [C,h,w]
+
+            if kind == 'identity':
+                identity_clog = pred['count_logits'][0].cpu().numpy().astype(np.float32)
+
+            if inv_angle is not None:
+                hh, ww = prob.shape[1], prob.shape[2]
+                Minv = cv2.getRotationMatrix2D((ww / 2.0, hh / 2.0), inv_angle, 1.0)
+                # 逆旋轉每個 channel；旋轉到框外的區域填 0 (= 無 activation)
+                prob = np.stack([
+                    cv2.warpAffine(prob[c], Minv, (ww, hh),
+                                   flags=cv2.INTER_LINEAR, borderValue=0.0)
+                    for c in range(prob.shape[0])
+                ], axis=0)
+
+            acc_prob = prob if acc_prob is None else acc_prob + prob
+            nv += 1
+
+        # count_logits 用 identity 那次（若 TTA 清單沒含 identity 則退而求其次跑一次）
+        if identity_clog is None:
+            pred = self._forward_normalized(resized)
+            identity_clog = pred['count_logits'][0].cpu().numpy().astype(np.float32)
+
+        return acc_prob / max(nv, 1), identity_clog
 
     def _assign_slot_names(self, names, count, anchor='bottom'):
         """把解碼 slot（由上而下，slot 0 = 最頂那節）對應到解剖名稱清單。
