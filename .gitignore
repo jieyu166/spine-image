@@ -53,5 +53,19 @@ spinefm_weights/
 *.temp
 *.log
 
+# QA 對照輸出（overlay .png 已被上面忽略，但每張的 _compare.json / _summary.json 沒有）
+comparison_*/
+
+# 實驗與規劃資料（NHANES contour JSON、planning 影像等）
+planning/
+
+# CV 訓練產物
+cv_results.json
+cv_train_log.txt
+
+# SpineFM sidecar 輸出
+*.spinefm.json
+*.spinefm.png
+
 # Other files folder (keep structure but not contents)
 # Other files/
