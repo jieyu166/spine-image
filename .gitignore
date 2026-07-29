@@ -52,6 +52,7 @@ spinefm_weights/
 *.tmp
 *.temp
 *.log
+.worktrees/
 
 # QA 對照輸出（overlay .png 已被上面忽略，但每張的 _compare.json / _summary.json 沒有）
 comparison_*/
