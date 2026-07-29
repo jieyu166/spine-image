@@ -54,16 +54,57 @@ ANCHOR_CONFIG = {
     'C': 'top',
 }
 
-# 4 個角點名稱 (固定順序)
-CORNER_NAMES = ['anteriorSuperior', 'posteriorSuperior', 'posteriorInferior', 'anteriorInferior']
+# 模型輸出點位名稱（固定 channel 順序）
+POINT_NAMES_4 = [
+    'anteriorSuperior', 'posteriorSuperior',
+    'posteriorInferior', 'anteriorInferior',
+]
+POINT_NAMES_6 = [
+    'anteriorSuperior', 'middleSuperior', 'posteriorSuperior',
+    'posteriorInferior', 'middleInferior', 'anteriorInferior',
+]
+# 對外相容名稱；QA/比較工具應比較完整 6 點。
+CORNER_NAMES = POINT_NAMES_6
 
 # 角點繪製顏色 (BGR)
 CORNER_COLORS = [
     (0, 255, 0),    # anteriorSuperior - 綠
+    (255, 255, 0),  # middleSuperior - 青
     (255, 0, 0),    # posteriorSuperior - 藍
     (0, 0, 255),    # posteriorInferior - 紅
+    (255, 0, 255),  # middleInferior - 紫
     (0, 255, 255),  # anteriorInferior - 黃
 ]
+
+
+def infer_points_per_vertebra(state_dict, max_vertebrae):
+    """Infer 4-point legacy vs 6-point model layout from output channels."""
+    output_channels = None
+    for key in ('channel_embed', 'heatmap_final.weight', 'heatmap_final.bias'):
+        if key in state_dict:
+            output_channels = int(state_dict[key].shape[0])
+            break
+    if output_channels is None:
+        return 4
+    if output_channels % max_vertebrae:
+        raise ValueError(
+            f"checkpoint has {output_channels} channels, not divisible by "
+            f"max_vertebrae={max_vertebrae}"
+        )
+    points_per_vertebra = output_channels // max_vertebrae
+    if points_per_vertebra not in (4, 6):
+        raise ValueError(
+            f"unsupported checkpoint layout: {points_per_vertebra} points per vertebra"
+        )
+    return points_per_vertebra
+
+
+def validate_ensemble_layout(main_points, member_points):
+    """Reject ensembles whose members use different point/channel layouts."""
+    if member_points != main_points:
+        raise ValueError(
+            f"incompatible point layout: main={main_points}, member={member_points}"
+        )
 
 
 def extract_peaks_from_heatmap(heatmap, threshold=0.3, blur_sigma=6.0, blur_ksize=15):
@@ -141,12 +182,13 @@ class VertebraInference:
             self.device = torch.device(device)
 
         self.max_vertebrae = max_vertebrae
+        ensemble_paths_explicit = ensemble_paths is not None
         print(f"Device: {self.device}")
 
         # 載入模型
         print(f"Loading model: {model_path}")
 
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.config = checkpoint.get('config', {})
         self.model_version = checkpoint.get('model_version', 'unknown')
         self.heatmap_size = checkpoint.get('heatmap_size', HEATMAP_SIZE)
@@ -159,9 +201,17 @@ class VertebraInference:
         if is_v2_checkpoint:
             print("  Detected V2 checkpoint -> loading with V2 model architecture")
             self.model_version = 'v2_legacy'
+            self.points_per_vertebra = 4
             self._load_v2_model(state_dict, max_vertebrae)
         else:
-            self.model = VertebraCornerModel(max_vertebrae=max_vertebrae, pretrained=False)
+            self.points_per_vertebra = infer_points_per_vertebra(
+                state_dict, max_vertebrae
+            )
+            self.model = VertebraCornerModel(
+                max_vertebrae=max_vertebrae,
+                points_per_vertebra=self.points_per_vertebra,
+                pretrained=False,
+            )
             try:
                 self.model.load_state_dict(state_dict)
                 # 偵測 V3.1 (有 channel_embed) vs V3.0
@@ -213,9 +263,17 @@ class VertebraInference:
         if ensemble_paths:
             for p in ensemble_paths:
                 try:
-                    ck = torch.load(p, map_location=self.device, weights_only=False)
+                    ck = torch.load(p, map_location=self.device, weights_only=True)
                     sd = ck['model_state_dict']
-                    m = VertebraCornerModel(max_vertebrae=max_vertebrae, pretrained=False)
+                    member_points = infer_points_per_vertebra(sd, max_vertebrae)
+                    validate_ensemble_layout(
+                        self.points_per_vertebra, member_points
+                    )
+                    m = VertebraCornerModel(
+                        max_vertebrae=max_vertebrae,
+                        points_per_vertebra=member_points,
+                        pretrained=False,
+                    )
                     m.load_state_dict(sd)
                     m = m.to(self.device).eval()
                     self.ensemble_models.append(m)
@@ -223,6 +281,10 @@ class VertebraInference:
                     print(f"  + ensemble member: {os.path.basename(p)}"
                           + (f" (val_loss {vl:.4f})" if vl else ""))
                 except Exception as e:
+                    if ensemble_paths_explicit:
+                        raise RuntimeError(
+                            f"failed to load explicit ensemble member {p}: {e}"
+                        ) from e
                     print(f"  [ensemble] 跳過 {p}: {e}")
             if self.ensemble_models:
                 print(f"  Ensemble 啟用：主模型 + {len(self.ensemble_models)} 個成員，共 "
@@ -383,7 +445,7 @@ class VertebraInference:
         boundary = BOUNDARY_CONFIG.get(spine_type, {})
 
         # ── 命名錨定：把「第 i 個解碼 slot（由上而下）」對應到解剖名稱 ──
-        # 模型的 32 channel 是 top-down 位置 slot（slot 0 = 最頂那節）。命名若一律
+        # 模型的 32/48 channel 是 top-down 位置 slot（slot 0 = 最頂那節）。命名若一律
         # 從 T12 起算，當影像沒有 T12（頂端被裁）但 count 數多 1 時，整條序列往下
         # 錯位一格 → catastrophe（如 81161252、21584353，mean 700-800px）。
         # 改成依 spine_type 從穩定端錨定（L 從 S1、C 從 C2）。
@@ -405,7 +467,7 @@ class VertebraInference:
         # ── Post-process: hard aspect-ratio constraint ──
         # V3.4 訓練後人工檢視發現「同椎體 4 corner 被學成垂直長條」(PRED aspect 0.5
         # vs GT ~1.2)，且 V3.5 / V3.6 重訓嘗試 5 輪都無法解。此處不動模型，僅在
-        # 推論後對 4 角點完整的椎體做 hard fix：aspect < 0.7 時，把 width 拉到
+        # 推論後對四角完整的椎體做 hard fix（middle points 跟著同一 X scale）：
         # 1.2*height (X 軸 scale 圍中心放大)。Y 不動 (Y 是 V3.4 較弱的軸，X 是
         # 較準的軸，調 X 風險低)。Boundary 椎體只有 2 角點，跳過。
         self._apply_aspect_fix(vertebrae,
@@ -587,7 +649,7 @@ class VertebraInference:
 
             corners = {}
             for j in range(4):
-                corner_name = CORNER_NAMES[j]
+                corner_name = POINT_NAMES_4[j]
                 if boundary_type == 'upper' and j >= 2:
                     continue
                 if boundary_type == 'lower' and j < 2:
@@ -619,11 +681,18 @@ class VertebraInference:
         """
         heatmaps = torch.sigmoid(predictions['heatmaps'][0]).cpu().numpy()  # [C, H, W]
         hm_h, hm_w = heatmaps.shape[1], heatmaps.shape[2]
+        point_names = (
+            POINT_NAMES_6
+            if getattr(self, 'points_per_vertebra', 4) == 6
+            else POINT_NAMES_4
+        )
+        upper_names = {'anteriorSuperior', 'middleSuperior', 'posteriorSuperior'}
+        lower_names = {'posteriorInferior', 'middleInferior', 'anteriorInferior'}
 
         vertebrae = []
         for i in range(min(predicted_count, self.max_vertebrae)):
             name = slot_names[i] if i < len(slot_names) else f'V{i+1}'
-            base_idx = i * 4
+            base_idx = i * len(point_names)
 
             if name in boundary.get('upper', []):
                 boundary_type = 'upper'
@@ -635,11 +704,10 @@ class VertebraInference:
             corners = {}
             corner_confidences = {}
 
-            for j in range(4):
-                corner_name = CORNER_NAMES[j]
-                if boundary_type == 'upper' and j >= 2:
+            for j, corner_name in enumerate(point_names):
+                if boundary_type == 'upper' and corner_name not in upper_names:
                     continue
-                if boundary_type == 'lower' and j < 2:
+                if boundary_type == 'lower' and corner_name not in lower_names:
                     continue
 
                 ch_idx = base_idx + j
@@ -681,10 +749,10 @@ class VertebraInference:
         return vertebrae, combined_heatmap, heatmaps
 
     def _apply_aspect_fix(self, vertebrae, min_aspect=0.9, max_scale=1.6):
-        """Hard aspect-ratio fix — 對 4 角點完整的椎體，aspect < min_aspect 時
+        """Hard aspect-ratio fix — 對 4 個 corner 完整的椎體，aspect < min_aspect 時
         X 軸圍中心放大到「剛好達到 min_aspect」（不是固定 target，避免過度修正）。
         額外加 max_scale 上限避免極端 case 推太遠。
-        Y 軸不動。Boundary 椎體 (2 角點) 跳過。
+        Y 軸不動；middle points 套用同一 X scale。Boundary 椎體跳過。
 
         Args:
             min_aspect: aspect (W/H) 下限門檻，原 aspect 低於此就修
@@ -693,10 +761,11 @@ class VertebraInference:
         n_fixed = 0
         for v in vertebrae:
             pts = v.get('points', {})
-            if len(pts) < 4:
+            corner_pts = [pts[name] for name in POINT_NAMES_4 if name in pts]
+            if len(corner_pts) < 4:
                 continue
-            xs = [p['x'] for p in pts.values()]
-            ys = [p['y'] for p in pts.values()]
+            xs = [p['x'] for p in corner_pts]
+            ys = [p['y'] for p in corner_pts]
             cx = sum(xs) / 4.0
             W = max(xs) - min(xs)
             H = max(ys) - min(ys)

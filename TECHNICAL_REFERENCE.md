@@ -44,7 +44,7 @@ UNet Decoder (skip connections):
 Heatmap Head:
   Conv2d(128, 64, 3) → BN → ReLU
   → Upsample(scale=2)        → [B, 64, 128, 128]
-  → Conv2d(64, 32, 1)        → [B, 32, 128, 128]
+  → Conv2d(64, 48, 1)        → [B, 48, 128, 128]
 
 Count Head:
   AdaptiveAvgPool2d(1) → Flatten

@@ -1,11 +1,13 @@
 # 脊椎椎體偵測專案 (Spine Vertebra Detection)
 
-基於深度學習的脊椎側位 X 光「椎體角點」自動偵測系統。對每節椎體標出 4 個角點（前上、後上、後下、前下），再自動算出椎間盤高度、Wedge angle、壓迫性骨折、滑脫等指標。
+基於深度學習的脊椎側位 X 光「椎體終板點位」自動偵測系統。新訓練管線對每節椎體使用 4 個角點加 `middleSuperior`、`middleInferior`（共 6 點），再自動算出椎間盤高度、Wedge angle、壓迫性骨折、滑脫等指標。
 
 - **目前生產配置**：V3.4（aspect-aware）+ baseline + fold3 ensemble + 全推論後處理鏈
 - **定位精度**：overall_mean **97.6 px** / median **41.9 px** / 29 of 32 影像 < 100 px
 - **訓練資料**：~35 張人工標註（是的，就這麼少 —— 後面會講這件事為什麼是整個故事的主角）
-- **最後更新**：2026-06-11
+- **最後更新**：2026-07-29
+
+> 現有 97.6 px 生產權重仍是舊 4-point / 32-channel 模型；推論端會從 checkpoint 自動辨識 4 或 6 點。新 6-point / 48-channel head 必須完成重訓後才會取代既有權重。
 
 > 下面這份 changelog 我用上課的方式寫。不是因為想搞花樣，而是這個專案最值錢的東西不是「程式碼」，是「為什麼這樣做」。技巧本身網路上都查得到，但「在什麼情況下、為了解決什麼痛、最後付出什麼代價」—— 這個才是別人帶不走的。所以我們一個一個講。
 
@@ -206,16 +208,17 @@ pip install albumentations==1.3.1   # 1.4+ 在 Python 3.14 有安裝問題
 ### 工作流程
 
 ```bash
-# 1. 標註：打開 spinal-annotation-web.html，標每節椎體 4 角點，匯出 JSON
+# 1. 標註：打開 spinal-annotation-web.html，標每節椎體 4 角點 + 上下 middle point，匯出 JSON
 #    L-spine 由下到上 (S1→L5→...)；C-spine 由上到下 (C2→C3→...)
 
 # 2. 重生 train/val split（從 Images/ 掃描配對）
-python regenerate_splits.py
+python regenerate_splits.py --group-regex '(?:^|/)(\d{8}|[CL]\d{5})[^/]*$'
 
 # 3. 訓練（單模型）
 python train_vertebra_model.py --epochs 30 --unfreeze-epoch 5
 
 # 3b. 訓練（5-fold ensemble，~100 分鐘；先停睡眠 powercfg /change standby-timeout-ac 0）
+#     預設依 8 位病歷號或 C/L+5 位 dataset ID 做 group-aware folds。
 python train_vertebra_model_cv.py --n-folds 5 --epochs 30 --unfreeze-epoch 5
 
 # 4. 推論
@@ -258,7 +261,7 @@ ResNet50 Backbone (RadImageNet 預訓練):
 UNet Decoder (skip connections) + CoordConv + Channel Embedding
   ↓
 輸出:
-├── heatmaps: [B, 32, 128, 128]   (8 椎體 × 4 角點 = 32 通道)
+├── heatmaps: [B, 48, 128, 128]   (8 椎體 × 6 點 = 48 通道)
 └── count_logits: [B, 9]           (0~8 椎體計數)
 
 推論後處理鏈:
@@ -279,7 +282,7 @@ Focal Loss (alpha=2.0, beta=4.0)：處理背景佔 99%+ 的正負樣本不平衡
 ```
 Spine/
 ├── 核心
-│   ├── train_vertebra_model.py      # V3.4 訓練（aspect-aware + 32-channel heatmap）
+│   ├── train_vertebra_model.py      # V3.4 訓練（aspect-aware + 48-channel heatmap）
 │   ├── train_vertebra_model_cv.py   # 5-fold CV 訓練
 │   ├── inference_vertebra.py        # 推論 + 全後處理鏈（anchor/TTA/DARK/aspect-fix/ensemble）
 │   ├── api_server_vertebra.py       # FastAPI 服務 (port 8001)
@@ -288,7 +291,7 @@ Spine/
 │   └── eval_ensemble.py             # 5-fold ensemble 評估
 │
 ├── 標註工具
-│   ├── spinal-annotation-web.html   # 椎體 4 角點標註工具
+│   ├── spinal-annotation-web.html   # 椎體 4 角點 + 上下 middle point 標註工具
 │   └── pkl-contour-editor.html      # 外部 mask → 終板輪廓點編輯器
 │
 ├── 部署
