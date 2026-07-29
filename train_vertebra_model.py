@@ -18,18 +18,18 @@ V3.2 改進 (縮小 domain gap):
 V3.1 改進 (解決小樣本模式崩塌問題):
 - 凍結 backbone layer0~layer2: 減少可訓練參數從 36M → ~13M
 - CoordConv: 讓 decoder 直接感知空間座標
-- Channel Embedding: 32 個 learnable embedding 讓每個 channel 學習不同空間位置
+- Channel Embedding: 48 個 learnable embedding 讓每個 channel 學習不同空間位置
 - RepeatDataset: 每 epoch 重複 8 次增加 augmentation 多樣性
 - Dropout2d + 更強 weight_decay: 防止小數據集過擬合
 
 V3.0 基礎:
-- 多通道 heatmap: 每個角點 slot 獨立 channel (max_vertebrae*4 channels)
+- 多通道 heatmap: 每個點位 slot 獨立 channel (max_vertebrae*6 channels)
 - UNet Decoder with skip connections
 - Focal Loss: 解決熱圖正負樣本不平衡
 - 保留椎體計數輔助任務
 
 支援:
-- 完整椎體: 4 個角點
+- 完整椎體: 4 個角點 + 上下終板 middle point（共 6 點）
 - 邊界椎體 (S1/T1=上終板 2點, T12/C2=下終板 2點)
 
 日期: 2025-2026
@@ -142,25 +142,35 @@ def load_radimagenet_weights(resnet, weights_path):
 class VertebraDataset(Dataset):
     """椎體頂點檢測數據集 V3.0
 
-    每個角點 slot 對應一個獨立的 heatmap channel。
-    max_vertebrae * 4 = 32 channels (預設)。
+    每個點位 slot 對應一個獨立的 heatmap channel。
+    max_vertebrae * 6 = 48 channels (預設)。
 
     支援:
-    - 完整椎體: 4 角點 (anteriorSuperior, posteriorSuperior, posteriorInferior, anteriorInferior)
-    - 上邊界椎體 (S1/T1): 2 點 (anteriorSuperior, posteriorSuperior)
-    - 下邊界椎體 (T12/C2): 2 點 (posteriorInferior, anteriorInferior)
+    - 完整椎體: 4 角點 + middleSuperior/middleInferior（缺 middle 時以 valid_mask 排除）
+    - 上邊界椎體 (S1/T1): anterior/middle/posterior Superior
+    - 下邊界椎體 (T12/C2): posterior/middle/anterior Inferior
+    - 舊 4 點 / boundary 2 點標註仍可讀取
     """
 
     BOUNDARY_CONFIG = {
         'L': {'upper': ['S1'], 'lower': ['T12']},
         'C': {'upper': ['T1'], 'lower': ['C2']},
     }
+    POINTS_PER_VERTEBRA = 6
+    POINT_NAMES = (
+        'anteriorSuperior',
+        'middleSuperior',
+        'posteriorSuperior',
+        'posteriorInferior',
+        'middleInferior',
+        'anteriorInferior',
+    )
 
     def __init__(self, data_dir, annotations_file, transform=None, max_vertebrae=8):
         self.data_dir = data_dir
         self.transform = transform
         self.max_vertebrae = max_vertebrae
-        self.num_channels = max_vertebrae * 4  # 每個角點一個 channel
+        self.num_channels = max_vertebrae * self.POINTS_PER_VERTEBRA
 
         with open(annotations_file, 'r', encoding='utf-8') as f:
             raw_annotations = json.load(f)
@@ -244,6 +254,51 @@ class VertebraDataset(Dataset):
             return 'lower'
         return None
 
+    @classmethod
+    def extract_point_slots(cls, points, boundary=None):
+        """Map dict/list annotations to six fixed slots per vertebra."""
+        if isinstance(points, dict):
+            if boundary == 'upper':
+                return [
+                    points.get('anteriorSuperior'),
+                    points.get('middleSuperior'),
+                    points.get('posteriorSuperior'),
+                    None, None, None,
+                ]
+            if boundary == 'lower':
+                return [
+                    None, None, None,
+                    points.get('posteriorInferior'),
+                    points.get('middleInferior'),
+                    points.get('anteriorInferior'),
+                ]
+            return [points.get(name) for name in cls.POINT_NAMES]
+
+        points = list(points or [])
+        if boundary == 'upper':
+            if len(points) >= 3:
+                return points[:3] + [None, None, None]
+            return [
+                points[0] if len(points) > 0 else None,
+                None,
+                points[1] if len(points) > 1 else None,
+                None, None, None,
+            ]
+        if boundary == 'lower':
+            if len(points) >= 3:
+                return [None, None, None] + points[:3]
+            return [
+                None, None, None,
+                points[0] if len(points) > 0 else None,
+                None,
+                points[1] if len(points) > 1 else None,
+            ]
+        if len(points) >= cls.POINTS_PER_VERTEBRA:
+            return points[:cls.POINTS_PER_VERTEBRA]
+        if len(points) >= 4:
+            return [points[0], None, points[1], points[2], None, points[3]]
+        return (points + [None] * cls.POINTS_PER_VERTEBRA)[:cls.POINTS_PER_VERTEBRA]
+
     def __getitem__(self, idx):
         annotation = self.annotations[idx]
 
@@ -258,7 +313,7 @@ class VertebraDataset(Dataset):
         spine_type = annotation.get('spine_type', annotation.get('spineType', 'L'))
 
         vertebrae = annotation.get('vertebrae', [])
-        keypoints = []     # 所有角點座標 (每椎體固定 4 slot)
+        keypoints = []     # 所有點位座標 (每椎體固定 6 slot)
         valid_flags = []   # 每個 slot 是否有效
         vertebra_names = []
 
@@ -268,35 +323,9 @@ class VertebraDataset(Dataset):
             vertebra_names.append(name)
             boundary = self._get_boundary_type(name, spine_type, v)
 
-            if isinstance(points, dict):
-                if boundary == 'upper':
-                    corners = [
-                        points.get('anteriorSuperior', {}),
-                        points.get('posteriorSuperior', {}),
-                        None, None,
-                    ]
-                elif boundary == 'lower':
-                    corners = [
-                        None, None,
-                        points.get('posteriorInferior', {}),
-                        points.get('anteriorInferior', {}),
-                    ]
-                else:
-                    corners = [
-                        points.get('anteriorSuperior', {}),
-                        points.get('posteriorSuperior', {}),
-                        points.get('posteriorInferior', {}),
-                        points.get('anteriorInferior', {}),
-                    ]
-            else:
-                if boundary == 'upper' and len(points) == 2:
-                    corners = [points[0], points[1], None, None]
-                elif boundary == 'lower' and len(points) == 2:
-                    corners = [None, None, points[0], points[1]]
-                else:
-                    corners = (points[:4] + [None]*4)[:4]
+            point_slots = self.extract_point_slots(points, boundary)
 
-            for corner in corners:
+            for corner in point_slots:
                 if corner is not None and corner:
                     x = corner.get('x', 0) if isinstance(corner, dict) else corner[0]
                     y = corner.get('y', 0) if isinstance(corner, dict) else corner[1]
@@ -484,12 +513,13 @@ class VertebraCornerModel(nn.Module):
     改進 V3.0 → V3.1:
     - 凍結 backbone layer0~layer2 (只訓練 layer3, layer4, decoder)
     - CoordConv: 每個 decoder 階段注入空間座標
-    - Channel Embedding: 32 個 learnable embedding 幫助每個 channel 學習不同位置
+    - Channel Embedding: 48 個 learnable embedding 幫助每個 channel 學習不同位置
     - 更強的 Dropout 避免小數據集過擬合
     """
 
     def __init__(self, max_vertebrae=8, pretrained=True,
-                 pretrained_path=RADIMAGENET_PATH_DEFAULT):
+                 pretrained_path=RADIMAGENET_PATH_DEFAULT,
+                 points_per_vertebra=6):
         """
         Args:
             pretrained: True=載入 pretrained backbone, False=隨機初始化 (inference 用)
@@ -498,7 +528,8 @@ class VertebraCornerModel(nn.Module):
         super(VertebraCornerModel, self).__init__()
 
         self.max_vertebrae = max_vertebrae
-        self.num_channels = max_vertebrae * 4
+        self.points_per_vertebra = points_per_vertebra
+        self.num_channels = max_vertebrae * points_per_vertebra
 
         # ── Backbone: ResNet50 with medical-domain pretrained weights ──
         # V3.2: 優先用 RadImageNet (1.35M 放射影像)；找不到檔案時 fallback 到 ImageNet。
@@ -898,7 +929,7 @@ class VertebraTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_loss,
                     'config': self.config,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.4-6point',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, 'best_vertebra_model.pth')
@@ -911,7 +942,7 @@ class VertebraTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'val_loss': val_loss,
-                    'model_version': 'v3.4',
+                    'model_version': 'v3.4-6point',
                     'backbone_source': getattr(self.model, 'backbone_source', 'unknown'),
                     'heatmap_size': HEATMAP_SIZE,
                 }, f'checkpoint_vertebra_epoch_{epoch+1}.pth')
@@ -1056,6 +1087,7 @@ def main():
         'weight_decay': args.weight_decay,
         'num_workers': 0,
         'max_vertebrae': 8,
+        'points_per_vertebra': VertebraDataset.POINTS_PER_VERTEBRA,
         'repeat_dataset': args.repeat_dataset,
         'pretrained_path': args.pretrained_path,
         'unfreeze_epoch': args.unfreeze_epoch if args.unfreeze_epoch >= 0 else None,
@@ -1112,6 +1144,7 @@ def main():
 
     model = VertebraCornerModel(
         max_vertebrae=config['max_vertebrae'],
+        points_per_vertebra=config['points_per_vertebra'],
         pretrained=True,
         pretrained_path=config['pretrained_path'],
     )
