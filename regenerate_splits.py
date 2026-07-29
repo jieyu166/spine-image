@@ -2,11 +2,17 @@
 """重生 train/val annotations 從硬碟上實際存在的 paired image+json。
 
 舊的 train/val split 寫死了已經不存在的 SpineFM mask 路徑，且漏收 7 個
-Images/ 已標註樣本。此工具掃描 Images/ + repo root 的 spinefm 檔，
-重生 8:2 split (固定 seed=42)，並把舊檔備份成 .bak。
+Images/ 已標註樣本。此工具遞迴掃描 Images/（含日期子資料夾）+ repo root 的
+spinefm 檔，重生 8:2 split (固定 seed=42)，並把舊檔備份成 .bak。
+
+配對規則:
+    - <stem>.json 配同一資料夾同名 <stem>.png/.dcm/.jpg/.jpeg。
+    - 以 `samp` 結尾者為醫師標註 overlay（spinal-annotation-web.html 輸出），
+      僅作 AI 輸出 eval 參考，一律排除於訓練 split 之外。
+    - JSON 須含 vertebrae 欄位（由 build_annotation_entry 驗證）。
 
 用法:
-    python regenerate_splits.py [--val-ratio 0.2] [--seed 42]
+    python regenerate_splits.py [--val-ratio 0.2] [--seed 42] [--dry-run]
 """
 from __future__ import annotations
 
@@ -28,14 +34,18 @@ VAL_FILE = ANN_DIR / 'val_annotations.json'
 
 
 def find_paired_samples():
-    """掃 Images/ + ROOT 找出 (image_path_relative_to_root, json_full_path)。"""
+    """掃 Images/（遞迴，含日期子資料夾）+ ROOT 找出
+    (image_path_relative_to_root, json_full_path)。"""
     pairs: list[tuple[str, Path]] = []
 
-    # Images/ 下 flat 配對
-    for json_path in sorted(IMAGES_DIR.glob('*.json')):
+    # Images/ 遞迴配對：同資料夾內 <stem>.json 配同名圖
+    for json_path in sorted(IMAGES_DIR.rglob('*.json')):
         stem = json_path.stem
+        # samp 結尾＝醫師標註 overlay，僅供 eval，不進訓練
+        if stem.endswith('samp'):
+            continue
         for ext in IMAGE_EXTS:
-            img = IMAGES_DIR / f'{stem}{ext}'
+            img = json_path.with_name(f'{stem}{ext}')
             if img.exists():
                 rel = img.relative_to(ROOT).as_posix()
                 pairs.append((rel, json_path))
