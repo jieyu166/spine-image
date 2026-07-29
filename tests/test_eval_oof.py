@@ -318,6 +318,32 @@ def test_write_reports_creates_parseable_outputs_and_labels_reference(tmp_path):
     assert "training-exposed" in comparison
 
 
+def test_comparison_table_uses_common_corners_not_new_model_all_points(tmp_path):
+    config = _valid_config(tmp_path)
+    image_path = config.project_root / "Images" / "80145593.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    middle_bad = _vertebra()
+    middle_bad["points"]["middleSuperior"]["y"] = 60
+    middle_bad["points"]["middleInferior"]["y"] = 70
+    oof_cases = [_successful_case(image_path, prediction=middle_bad)]
+    production_cases = [
+        _successful_case(image_path, prediction=_four_point_vertebra())
+    ]
+
+    paths = write_reports(config, oof_cases, production_cases)
+
+    comparison = paths["comparison"].read_text(encoding="utf-8")
+    new_row = next(
+        line
+        for line in comparison.splitlines()
+        if line.startswith("| New six-point OOF |")
+    )
+    assert "Corner mean px" in comparison
+    assert "| New six-point OOF | 1 | 0 | 0.00 |" in new_row
+    assert "Middle-only OOF" in comparison
+
+
 def test_render_worst_overlays_writes_requested_pngs_and_manifest(tmp_path):
     config = replace(_valid_config(tmp_path), worst_count=2)
     first_image = config.project_root / "Images" / "80145593.png"

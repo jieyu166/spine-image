@@ -366,9 +366,9 @@ def _format_metric(value):
 
 
 def _comparison_markdown(oof_summary, production_summary):
-    oof_all = oof_summary["groups"]["all"]
-    production_all = (
-        production_summary["groups"]["all"]
+    oof_corners = oof_summary["groups"]["corners"]
+    production_corners = (
+        production_summary["groups"]["corners"]
         if production_summary is not None
         else {}
     )
@@ -379,14 +379,14 @@ def _comparison_markdown(oof_summary, production_summary):
         "**training-exposed** on part of this dataset and is not an unbiased "
         "head-to-head estimate.",
         "",
-        "| Evaluation | Cases | Failed | Mean px | Median px | P90 px | Count exact |",
+        "| Evaluation | Cases | Failed | Corner mean px | Corner median px | Corner P90 px | Count exact |",
         "|---|---:|---:|---:|---:|---:|---:|",
         (
             f"| New six-point OOF | {oof_summary['n_cases']} | "
             f"{oof_summary['n_failed_predictions']} | "
-            f"{_format_metric(oof_all['mean_distance_px'])} | "
-            f"{_format_metric(oof_all['median_distance_px'])} | "
-            f"{_format_metric(oof_all['p90_distance_px'])} | "
+            f"{_format_metric(oof_corners['mean_distance_px'])} | "
+            f"{_format_metric(oof_corners['median_distance_px'])} | "
+            f"{_format_metric(oof_corners['p90_distance_px'])} | "
             f"{_format_metric(oof_summary['count_exact_match_rate'])} |"
         ),
     ]
@@ -394,13 +394,38 @@ def _comparison_markdown(oof_summary, production_summary):
         lines.append(
             f"| Production non-OOF reference | {production_summary['n_cases']} | "
             f"{production_summary['n_failed_predictions']} | "
-            f"{_format_metric(production_all['mean_distance_px'])} | "
-            f"{_format_metric(production_all['median_distance_px'])} | "
-            f"{_format_metric(production_all['p90_distance_px'])} | "
+            f"{_format_metric(production_corners['mean_distance_px'])} | "
+            f"{_format_metric(production_corners['median_distance_px'])} | "
+            f"{_format_metric(production_corners['p90_distance_px'])} | "
             f"{_format_metric(production_summary['count_exact_match_rate'])} |"
         )
+    oof_all = oof_summary["groups"]["all"]
+    oof_middle = oof_summary["groups"]["middle"]
     lines.extend(
         [
+            "",
+            "## New six-point OOF landmark detail",
+            "",
+            "| Landmark group | N | Mean px | Median px | P90 px |",
+            "|---|---:|---:|---:|---:|",
+            (
+                f"| All six landmarks | {oof_all['n']} | "
+                f"{_format_metric(oof_all['mean_distance_px'])} | "
+                f"{_format_metric(oof_all['median_distance_px'])} | "
+                f"{_format_metric(oof_all['p90_distance_px'])} |"
+            ),
+            (
+                f"| Common four corners | {oof_corners['n']} | "
+                f"{_format_metric(oof_corners['mean_distance_px'])} | "
+                f"{_format_metric(oof_corners['median_distance_px'])} | "
+                f"{_format_metric(oof_corners['p90_distance_px'])} |"
+            ),
+            (
+                f"| Middle-only OOF | {oof_middle['n']} | "
+                f"{_format_metric(oof_middle['mean_distance_px'])} | "
+                f"{_format_metric(oof_middle['median_distance_px'])} | "
+                f"{_format_metric(oof_middle['p90_distance_px'])} |"
+            ),
             "",
             "Middle-point values are reported only when the model actually emits "
             "`middleSuperior` and `middleInferior`; missing points are not synthesized.",
