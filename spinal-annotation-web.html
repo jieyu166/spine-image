@@ -537,6 +537,9 @@
         let processedImage = null;
         let annotationFinished = false; // 提前結束標註
         let endplatePointMode = 3; // 2 or 3 points per endplate
+        let annotationDirty = false;
+        let currentImageMeta = null;
+        let imageLoadToken = 0;
 
         // ==================== 輔助函數 ====================
         function getNextVertebraName() {
@@ -618,6 +621,7 @@
 
         function handleFileSelect(event) {
             const file = event.target.files[0];
+            event.target.value = '';
             if (file) loadImageFromFile(file);
         }
 
@@ -646,26 +650,72 @@
             }).catch(() => alert('請使用 Ctrl+V 貼上'));
         }
 
+        function confirmDiscardUnsavedChanges() {
+            if (!annotationDirty) return true;
+            return confirm('目前標註尚未匯出。確定要載入下一張影像並捨棄未儲存的標註嗎？');
+        }
+
+        async function calculateFileSha256(file) {
+            if (!file || typeof file.arrayBuffer !== 'function' || !crypto?.subtle) return null;
+            try {
+                const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+                return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+            } catch (error) {
+                console.warn('無法計算影像 SHA-256：', error);
+                return null;
+            }
+        }
+
+        function commitLoadedImage(img, file = {}, sha256 = null) {
+            const width = img.naturalWidth || img.width;
+            const height = img.naturalHeight || img.height;
+
+            resetCaseState();
+            originalImage = img;
+            currentImageMeta = {
+                filename: file.name || null,
+                width,
+                height,
+                size: Number.isFinite(file.size) ? file.size : null,
+                lastModified: Number.isFinite(file.lastModified) ? file.lastModified : null,
+                sha256: sha256 || null
+            };
+            canvas.width = width;
+            canvas.height = height;
+            zoom = 1;
+            panX = 0;
+            panY = 0;
+            redraw();
+            updateUI();
+        }
+
         function loadImageFromFile(file) {
+            if (!confirmDiscardUnsavedChanges()) return;
+            const requestToken = ++imageLoadToken;
+            const pendingData = window._pendingSpineFM;
+            const pendingName = window._spinefmJsonName;
             const reader = new FileReader();
             reader.onload = function(e) {
                 const img = new Image();
-                img.onload = function() {
-                    originalImage = img;
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    resetZoom();
-                    contrastEnhanced = false;
-                    processedImage = null;
-                    redraw();
-                    updateUI();
+                img.onload = async function() {
+                    const sha256 = await calculateFileSha256(file);
+                    if (requestToken !== imageLoadToken) return;
+                    commitLoadedImage(img, file, sha256);
 
                     // 自動套用暫存的 SpineFM 資料
-                    if (window._pendingSpineFM) {
-                        _applySpineFMData(window._pendingSpineFM);
+                    if (pendingData) {
+                        window._pendingSpineFM = pendingData;
+                        window._spinefmJsonName = pendingName;
+                        _applySpineFMData(pendingData);
                     }
                 };
+                img.onerror = function() {
+                    if (requestToken === imageLoadToken) alert('影像無法解碼，原本的影像與標註已保留。');
+                };
                 img.src = e.target.result;
+            };
+            reader.onerror = function() {
+                if (requestToken === imageLoadToken) alert('影像讀取失敗，原本的影像與標註已保留。');
             };
             reader.readAsDataURL(file);
         }
@@ -735,6 +785,40 @@
         // ── 框選狀態 ──
         let selectBox = null;      // {startX, startY, endX, endY} 影像座標
         let selectedVertebrae = new Set();  // 被框選/點選的椎體 index
+
+        function resetCaseState(options = {}) {
+            const keepImage = options.keepImage === true;
+
+            vertebrae = [];
+            currentPoints = [];
+            annotationFinished = false;
+            annotationDirty = false;
+
+            isDragging = false;
+            wasDragging = false;
+            dragInfo = null;
+            groupDrag = null;
+            _justDragged = false;
+            selectBox = null;
+            selectedVertebrae.clear();
+
+            window._pendingSpineFM = null;
+            window._spinefmJsonName = null;
+
+            if (!keepImage) {
+                originalImage = null;
+                currentImageMeta = null;
+                contrastEnhanced = false;
+                processedImage = null;
+                zoom = 1;
+                panX = 0;
+                panY = 0;
+            }
+        }
+
+        function markAnnotationDirty() {
+            annotationDirty = true;
+        }
 
         function _canvasToImage(e) {
             const rect = canvas.getBoundingClientRect();
@@ -880,6 +964,7 @@
                 }
                 groupDrag.lastImgX = imgX;
                 groupDrag.lastImgY = imgY;
+                markAnnotationDirty();
                 redraw();
                 return;
             }
@@ -890,6 +975,7 @@
                 const pt = vertebrae[dragInfo.vertebraIdx].points[dragInfo.pointIdx];
                 pt.x = imgX;
                 pt.y = imgY;
+                markAnnotationDirty();
                 redraw();
                 return;
             }
@@ -1005,6 +1091,7 @@
             }
             selectedVertebrae.clear();
             annotationFinished = false;
+            markAnnotationDirty();
             redraw();
             updateUI();
         }
@@ -1082,6 +1169,7 @@
 
             const requiredPts = getRequiredPoints(nextName);
             currentPoints.push({x, y});
+            markAnnotationDirty();
 
             if (currentPoints.length === requiredPts) {
                 const boundaryType = isBoundary(nextName);
@@ -1251,9 +1339,11 @@
         function undoPoint() {
             if (currentPoints.length > 0) {
                 currentPoints.pop();
+                markAnnotationDirty();
             } else if (vertebrae.length > 0) {
                 vertebrae.pop();
                 annotationFinished = false; // 撤銷後可繼續標註
+                markAnnotationDirty();
             }
             redraw();
             updateUI();
@@ -1262,9 +1352,11 @@
         function deleteCurrentVertebra() {
             if (currentPoints.length > 0) {
                 currentPoints = [];
+                markAnnotationDirty();
             } else if (vertebrae.length > 0) {
                 vertebrae.pop();
                 annotationFinished = false; // 刪除椎體後可繼續標註
+                markAnnotationDirty();
             }
             redraw();
             updateUI();
@@ -1272,9 +1364,7 @@
 
         function clearAll() {
             if (confirm('確定清除所有標註？')) {
-                vertebrae = [];
-                currentPoints = [];
-                annotationFinished = false;
+                resetCaseState({ keepImage: true });
                 redraw();
                 updateUI();
             }
@@ -1290,6 +1380,7 @@
                 currentPoints = [];
             }
             annotationFinished = true;
+            markAnnotationDirty();
             redraw();
             updateUI();
         }
@@ -1304,7 +1395,7 @@
             reader.onload = function(e) {
                 try {
                     const data = JSON.parse(e.target.result);
-                    importAnnotationJson(data);
+                    importAnnotationJson(data, { jsonFilename: file.name });
                 } catch(err) {
                     alert('JSON 解析失敗: ' + err.message);
                 }
@@ -1312,7 +1403,62 @@
             reader.readAsText(file);
         }
 
-        function importAnnotationJson(data) {
+        function filenameStem(filename, isJson = false) {
+            const leaf = String(filename || '').split(/[\\/]/).pop();
+            let stem = leaf.replace(/\.[^.]+$/, '');
+            if (isJson) stem = stem.replace(/\.spinefm$/i, '');
+            return stem.toLowerCase();
+        }
+
+        function validateAnnotationForCurrentImage(data, jsonFilename = null) {
+            const errors = [];
+            const warnings = [];
+
+            if (!originalImage) {
+                errors.push('請先載入要標註的影像。');
+                return { ok: false, errors, warnings };
+            }
+
+            const info = data && data.imageInfo;
+            if (!info || !Number.isFinite(Number(info.width)) || !Number.isFinite(Number(info.height))) {
+                errors.push('JSON 缺少可驗證的 imageInfo.width / height。');
+                return { ok: false, errors, warnings };
+            }
+
+            const imageWidth = currentImageMeta?.width || originalImage.naturalWidth || originalImage.width;
+            const imageHeight = currentImageMeta?.height || originalImage.naturalHeight || originalImage.height;
+            if (Number(info.width) !== Number(imageWidth) || Number(info.height) !== Number(imageHeight)) {
+                errors.push(`影像尺寸不符：JSON ${info.width}×${info.height}，目前影像 ${imageWidth}×${imageHeight}。`);
+            }
+
+            const currentFilename = currentImageMeta?.filename || null;
+            const jsonImageFilename = info.filename || info.fileName || null;
+            if (jsonImageFilename && currentFilename) {
+                if (String(jsonImageFilename).toLowerCase() !== String(currentFilename).toLowerCase()) {
+                    errors.push(`影像檔名不符：JSON 指向 ${jsonImageFilename}，目前影像為 ${currentFilename}。`);
+                }
+            } else {
+                const jsonStem = filenameStem(jsonFilename, true);
+                const imageStem = filenameStem(currentFilename);
+                if (!jsonStem || !imageStem || jsonStem !== imageStem) {
+                    errors.push('舊版 JSON 沒有影像檔名；JSON 與影像必須使用完全相同的主檔名。');
+                } else {
+                    warnings.push('舊版 JSON 沒有影像檔名或 SHA-256，已用同主檔名與相同尺寸驗證。');
+                }
+            }
+
+            const jsonHash = info.sha256 || info.sha256Hash || null;
+            const imageHash = currentImageMeta?.sha256 || null;
+            if (jsonHash && imageHash && String(jsonHash).toLowerCase() !== String(imageHash).toLowerCase()) {
+                errors.push('影像 SHA-256 不符，JSON 與目前影像不是同一檔案。');
+            } else if (jsonHash && !imageHash) {
+                warnings.push('目前環境無法取得影像 SHA-256，僅以檔名與尺寸驗證。');
+            }
+
+            return { ok: errors.length === 0, errors, warnings };
+        }
+
+        function importAnnotationJson(data, options = {}) {
             // 支援多種格式:
             // 1. V2.3 標註格式 (spinal-annotation-web 匯出)
             // 2. AI 推理結果格式 (spine-inference-web 匯出)
@@ -1321,7 +1467,22 @@
             const srcVertebrae = data.vertebrae;
             if (!srcVertebrae || srcVertebrae.length === 0) {
                 alert('JSON 中沒有找到椎體資料');
-                return;
+                return false;
+            }
+
+            if (!data.originalImageBase64 && !options.skipIdentityValidation) {
+                const validation = validateAnnotationForCurrentImage(data, options.jsonFilename || null);
+                if (!validation.ok) {
+                    alert('拒絕載入標註：\n' + validation.errors.join('\n'));
+                    return false;
+                }
+                if (validation.warnings.length > 0 && !options.silent) {
+                    alert(validation.warnings.join('\n'));
+                }
+            }
+
+            if (annotationDirty && !options.replaceConfirmed && !confirmDiscardUnsavedChanges()) {
+                return false;
             }
 
             // 設定脊椎類型
@@ -1335,25 +1496,33 @@
             if (data.originalImageBase64) {
                 const img = new Image();
                 img.onload = function() {
+                    resetCaseState();
                     originalImage = img;
                     canvas.width = Math.min(img.width, 1200);
                     canvas.height = Math.round(canvas.width * (img.height / img.width));
                     zoom = canvas.width / img.width;
                     panX = 0; panY = 0;
-                    _finishImport(srcVertebrae, data);
+                    currentImageMeta = {
+                        filename: data.imageInfo?.filename || null,
+                        width: img.naturalWidth || img.width,
+                        height: img.naturalHeight || img.height,
+                        size: null,
+                        lastModified: null,
+                        sha256: data.imageInfo?.sha256 || null
+                    };
+                    _finishImport(srcVertebrae, data, options);
                 };
                 img.src = data.originalImageBase64;
-                return;
+                return true;
             }
 
-            _finishImport(srcVertebrae, data);
+            _finishImport(srcVertebrae, data, options);
+            return true;
         }
 
-        function _finishImport(srcVertebrae, data) {
+        function _finishImport(srcVertebrae, data, options = {}) {
             // 清除現有標註
-            vertebrae = [];
-            currentPoints = [];
-            annotationFinished = false;
+            resetCaseState({ keepImage: true });
 
             const config = CONFIG[spineType];
 
@@ -1435,7 +1604,7 @@
             const src = data.source === 'ai-inference' ? ' (AI 推理結果)'
                        : data.source === 'spinefm' ? '' // SpineFM 有自己的 alert
                        : (data.backend === 'SpineFM' ? '' : '');
-            if (data.source !== 'spinefm') {
+            if (data.source !== 'spinefm' && !options.silent) {
                 alert(`成功匯入 ${vertebrae.length} 個椎體${src}\n\n可拖曳角點進行修正，完成後匯出 JSON`);
             }
         }
@@ -1500,9 +1669,13 @@
 
             // 只選了影像 → 載入影像，然後套用暫存的 SpineFM
             if (imageFile && !jsonFile) {
+                const pendingData = window._pendingSpineFM;
+                const pendingName = window._spinefmJsonName;
                 _loadImageFile(imageFile, function() {
-                    if (window._pendingSpineFM) {
-                        _applySpineFMData(window._pendingSpineFM);
+                    if (pendingData) {
+                        window._pendingSpineFM = pendingData;
+                        window._spinefmJsonName = pendingName;
+                        _applySpineFMData(pendingData);
                     }
                 });
                 return;
@@ -1519,6 +1692,7 @@
                             return;
                         }
                         _loadImageFile(imageFile, function() {
+                            window._spinefmJsonName = jsonFile.name;
                             _applySpineFMData(data);
                         });
                     } catch(err) {
@@ -1531,53 +1705,41 @@
         }
 
         function _loadImageFile(file, callback) {
+            if (!confirmDiscardUnsavedChanges()) return;
+            const requestToken = ++imageLoadToken;
             const reader = new FileReader();
             reader.onload = function(e) {
                 const img = new Image();
-                img.onload = function() {
-                    originalImage = img;
-                    processedImage = null;
-                    contrastEnhanced = false;
-
-                    canvas.width = Math.min(img.width, 1200);
-                    canvas.height = Math.round(canvas.width * (img.height / img.width));
-                    zoom = canvas.width / img.width;
-                    panX = 0; panY = 0;
-
-                    redraw();
-                    updateUI();
+                img.onload = async function() {
+                    const sha256 = await calculateFileSha256(file);
+                    if (requestToken !== imageLoadToken) return;
+                    commitLoadedImage(img, file, sha256);
                     if (callback) callback();
                 };
+                img.onerror = function() {
+                    if (requestToken === imageLoadToken) alert('影像無法解碼，原本的影像與標註已保留。');
+                };
                 img.src = e.target.result;
+            };
+            reader.onerror = function() {
+                if (requestToken === imageLoadToken) alert('影像讀取失敗，原本的影像與標註已保留。');
             };
             reader.readAsDataURL(file);
         }
 
         function _applySpineFMData(data) {
-            window._pendingSpineFM = null;
             const srcName = window._spinefmJsonName || 'SpineFM';
-            window._spinefmJsonName = null;
-
-            // 檢查影像尺寸是否匹配
-            if (data.imageInfo && originalImage) {
-                const jsonW = data.imageInfo.width;
-                const jsonH = data.imageInfo.height;
-                const imgW = originalImage.naturalWidth || originalImage.width;
-                const imgH = originalImage.naturalHeight || originalImage.height;
-                if (jsonW !== imgW || jsonH !== imgH) {
-                    const proceed = confirm(
-                        `影像尺寸不匹配:\n` +
-                        `  JSON: ${jsonW} x ${jsonH}\n` +
-                        `  影像: ${imgW} x ${imgH}\n\n` +
-                        `角點座標可能需要縮放。是否仍要匯入？`
-                    );
-                    if (!proceed) return;
-                }
-            }
 
             // 透過既有的 importAnnotationJson 匯入
             data.source = 'spinefm';
-            importAnnotationJson(data);
+            const imported = importAnnotationJson(data, { jsonFilename: srcName, silent: true });
+            if (!imported) {
+                window._pendingSpineFM = data;
+                window._spinefmJsonName = srcName;
+                return false;
+            }
+            window._pendingSpineFM = null;
+            window._spinefmJsonName = null;
 
             const count = data.vertebrae ? data.vertebrae.length : 0;
             const hasFracture = (data.vertebrae || []).some(v => v.genantGrade > 0);
@@ -1589,6 +1751,7 @@
             }
             msg += '\n請檢查角點位置，拖曳修正後匯出 JSON。';
             alert(msg);
+            return true;
         }
 
         // 自動從 sessionStorage 載入推理結果 (從 inference web 跳轉)
@@ -2173,6 +2336,7 @@
 
             vertebrae[idx].name = newName;
             vertebrae[idx].boundaryType = newBoundary;
+            markAnnotationDirty();
             updateUI();
             redraw();
         }
@@ -2314,8 +2478,12 @@
                 spineType: spineType,
                 endplatePointMode: endplatePointMode,
                 imageInfo: originalImage ? {
-                    width: originalImage.width,
-                    height: originalImage.height
+                    filename: currentImageMeta?.filename || null,
+                    width: currentImageMeta?.width || originalImage.naturalWidth || originalImage.width,
+                    height: currentImageMeta?.height || originalImage.naturalHeight || originalImage.height,
+                    size: currentImageMeta?.size ?? null,
+                    lastModified: currentImageMeta?.lastModified ?? null,
+                    sha256: currentImageMeta?.sha256 || null
                 } : null,
                 vertebrae: ordered.map(v => {
                     const entry = {
@@ -2379,9 +2547,11 @@
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `spine_annotation_${spineType}_${Date.now()}.json`;
+            const imageStem = String(currentImageMeta?.filename || '').split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+            a.download = imageStem ? `${imageStem}.json` : `spine_annotation_${spineType}_${Date.now()}.json`;
             a.click();
             URL.revokeObjectURL(url);
+            annotationDirty = false;
         }
 
         function exportReport() {
