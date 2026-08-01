@@ -1104,9 +1104,7 @@
         function setSpineType(type) {
             if (vertebrae.length > 0) {
                 if (!confirm('切換脊椎類型會清除現有標註，確定嗎？')) return;
-                vertebrae = [];
-                currentPoints = [];
-                annotationFinished = false;
+                resetCaseState({ keepImage: true });
             }
             spineType = type;
             document.querySelectorAll('.spine-type-btn').forEach(btn => {
@@ -1123,9 +1121,7 @@
                     updateEndplateModeUI();
                     return;
                 }
-                vertebrae = [];
-                currentPoints = [];
-                annotationFinished = false;
+                resetCaseState({ keepImage: true });
             }
             endplatePointMode = mode;
             updateEndplateModeUI();

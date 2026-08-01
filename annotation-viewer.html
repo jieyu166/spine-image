@@ -134,6 +134,20 @@
         .toggle-btn.active { background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 
         label.checkbox-label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+
+        /* Batch pair review */
+        .batch-panel { background: #eef6ff; border: 1px solid #b8d8f5; border-radius: 8px; padding: 10px; }
+        .batch-panel[hidden] { display: none; }
+        .batch-progress { font-weight: bold; color: #1f4f7a; margin-bottom: 6px; }
+        .batch-pair-name { font-size: 12px; overflow-wrap: anywhere; background: white; padding: 7px; border-radius: 5px; }
+        .batch-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+        .batch-actions button { flex: 1; justify-content: center; min-width: 90px; }
+        .batch-field { width: 100%; margin-top: 7px; padding: 7px; border: 1px solid #c8d2dc; border-radius: 5px; font-family: inherit; }
+        .review-current { outline: 3px solid #f1c40f; }
+        .batch-issues { margin-top: 8px; padding: 8px; background: #fff8e1; border-radius: 5px; font-size: 12px; }
+        .batch-help { margin-top: 7px; color: #607080; font-size: 11px; line-height: 1.45; }
+        .decision-match { background: #27ae60; color: white; }
+        .decision-mismatch { background: #c0392b; color: white; }
     </style>
 </head>
 <body>
@@ -152,6 +166,7 @@
                     <div class="toolbar-group">
                         <button class="btn-primary" onclick="pickImage()">📷 載入影像</button>
                         <button class="btn-success" onclick="pickJson()">📋 載入 JSON</button>
+                        <button class="btn-warning" onclick="pickReviewFolder()">📁 批次審查資料夾</button>
                     </div>
                     <div class="toolbar-group">
                         <button class="btn-secondary" onclick="zoomIn()">🔍+</button>
@@ -198,6 +213,41 @@
 
             <!-- Right -->
             <div class="sidebar">
+                <div class="section batch-panel" id="batchReviewPanel" hidden>
+                    <div class="section-title">🔎 圖片／JSON 配對審查</div>
+                    <div class="batch-progress" id="batchProgress">尚未載入資料夾</div>
+                    <div class="batch-pair-name" id="batchPairName">—</div>
+                    <div class="batch-actions">
+                        <button class="btn-secondary" onclick="batchPrevious()">← 上一筆 (J)</button>
+                        <button class="btn-secondary" onclick="batchNext()">下一筆 (K) →</button>
+                    </div>
+                    <select class="batch-field" id="mismatchReason" aria-label="不相符原因">
+                        <option value="">選擇不相符原因（必填）</option>
+                        <option value="image_patient_mismatch">影像／病人錯配</option>
+                        <option value="crop_or_dimension_mismatch">裁切或尺寸不符</option>
+                        <option value="annotation_global_offset">標註整體偏移</option>
+                        <option value="json_invalid">JSON 無效或點位異常</option>
+                        <option value="image_unreadable">影像不可判讀</option>
+                        <option value="other">其他（需備註）</option>
+                    </select>
+                    <textarea class="batch-field" id="mismatchNote" rows="2" placeholder="備註（選其他時必填）"></textarea>
+                    <div class="batch-actions">
+                        <button class="decision-match" onclick="markBatchMatch()">✓ 相符 (M)</button>
+                        <button class="decision-mismatch" onclick="markBatchMismatch()">✗ 不相符 (X)</button>
+                    </div>
+                    <div class="batch-actions">
+                        <button class="btn-secondary" onclick="exportPairReviewJson()">匯出 pair_review.json (S)</button>
+                        <button class="btn-secondary" onclick="exportPairReviewCsv()">匯出 pair_review.csv</button>
+                        <button class="btn-secondary" onclick="pickReviewManifest()">匯入審查紀錄</button>
+                    </div>
+                    <div class="batch-issues" id="batchIssues">尚未掃描</div>
+                    <select class="batch-field" id="manualImageSelect" aria-label="未配對影像"></select>
+                    <select class="batch-field" id="manualJsonSelect" aria-label="未配對 JSON"></select>
+                    <div class="batch-actions">
+                        <button class="btn-secondary" onclick="addManualPair()">建立人工配對</button>
+                    </div>
+                    <div class="batch-help">快捷鍵：M 相符、X 不相符、J/K 上一／下一筆、S 匯出 JSON。批次模式不會自動縮放 JSON 座標，尺寸錯配會原樣顯示。</div>
+                </div>
                 <div class="section">
                     <div class="section-title">📄 檔案資訊</div>
                     <div id="fileInfo"><div class="empty-state">尚未載入</div></div>
@@ -220,6 +270,8 @@
 
     <input type="file" id="imageInput" accept="image/*,.dcm" style="display:none;" onchange="handleImageFile(event)">
     <input type="file" id="jsonInput" accept=".json" style="display:none;" onchange="handleJsonFile(event)">
+    <input type="file" id="reviewFolderInput" webkitdirectory multiple style="display:none;" onchange="handleReviewFolder(event)">
+    <input type="file" id="manifestInput" accept=".json" style="display:none;" onchange="handleReviewManifest(event)">
 
     <script>
         // ==================== State ====================
@@ -230,6 +282,578 @@
         let scaleX = 1, scaleY = 1; // annotation coord → image coord scaling
         let isDragging = false, lastMouse = {x:0, y:0};
         let highlightVertebra = -1;
+        let batchReviewMode = false;
+
+        class PairScanner {
+            static IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'dcm']);
+            static EXCLUDED_SUFFIX = /(?:samp|ai|model)$/i;
+
+            static relativePath(file) {
+                return String(file.webkitRelativePath || file.name || '').replaceAll('\\', '/').replace(/^\.\//, '');
+            }
+
+            static splitPath(file) {
+                const path = PairScanner.relativePath(file);
+                const slash = path.lastIndexOf('/');
+                const directory = slash >= 0 ? path.slice(0, slash) : '';
+                const filename = slash >= 0 ? path.slice(slash + 1) : path;
+                const dot = filename.lastIndexOf('.');
+                const stem = dot >= 0 ? filename.slice(0, dot) : filename;
+                const extension = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : '';
+                return { path, directory, filename, stem, extension };
+            }
+
+            static fileRecord(file) {
+                const parts = PairScanner.splitPath(file);
+                return {
+                    ...parts,
+                    file,
+                    size: Number(file.size || 0),
+                    lastModified: Number(file.lastModified || 0),
+                    key: `${parts.directory.toLowerCase()}\u0000${parts.stem.toLowerCase()}`
+                };
+            }
+
+            static pairRecord(image, json, manual = false) {
+                const id = `${image.path}\u0000${json.path}`;
+                const signature = [
+                    image.path, image.size, image.lastModified,
+                    json.path, json.size, json.lastModified
+                ].join('|');
+                return {
+                    id,
+                    stem: image.stem,
+                    directory: image.directory,
+                    imagePath: image.path,
+                    jsonPath: json.path,
+                    imageFile: image.file,
+                    jsonFile: json.file,
+                    imageSize: image.size,
+                    jsonSize: json.size,
+                    imageLastModified: image.lastModified,
+                    jsonLastModified: json.lastModified,
+                    signature,
+                    manual
+                };
+            }
+
+            static hashText(text) {
+                let hash = 2166136261;
+                for (let index = 0; index < text.length; index++) {
+                    hash ^= text.charCodeAt(index);
+                    hash = Math.imul(hash, 16777619);
+                }
+                return (hash >>> 0).toString(16).padStart(8, '0');
+            }
+
+            static scan(fileList, manualPairs = []) {
+                const records = Array.from(fileList || []).map(file => PairScanner.fileRecord(file));
+                const formal = [];
+                const excluded = [];
+                const ignored = [];
+
+                for (const record of records) {
+                    const kind = PairScanner.IMAGE_EXTENSIONS.has(record.extension)
+                        ? 'image'
+                        : record.extension === 'json' ? 'json' : null;
+                    if (!kind) {
+                        ignored.push(record);
+                        continue;
+                    }
+                    record.kind = kind;
+                    if (PairScanner.EXCLUDED_SUFFIX.test(record.stem)) excluded.push(record);
+                    else formal.push(record);
+                }
+
+                const rootCandidates = formal.map(record => record.path.split('/')[0]).filter(Boolean);
+                const rootName = rootCandidates.length > 0 && rootCandidates.every(name => name === rootCandidates[0])
+                    ? rootCandidates[0]
+                    : 'selected-files';
+                const formalPaths = formal.map(record => record.path).sort();
+                const datasetKey = `annotation-pair-review:${rootName}:${PairScanner.hashText(formalPaths.join('\n'))}`;
+
+                const imagesByKey = new Map();
+                const jsonByKey = new Map();
+                for (const record of formal) {
+                    const target = record.kind === 'image' ? imagesByKey : jsonByKey;
+                    if (!target.has(record.key)) target.set(record.key, []);
+                    target.get(record.key).push(record);
+                }
+
+                const pairs = [];
+                const conflicts = [];
+                const errors = [];
+                const usedImages = new Set();
+                const usedJson = new Set();
+                const allKeys = new Set([...imagesByKey.keys(), ...jsonByKey.keys()]);
+
+                for (const key of allKeys) {
+                    const images = imagesByKey.get(key) || [];
+                    const jsonFiles = jsonByKey.get(key) || [];
+                    if (images.length > 1) {
+                        conflicts.push({ code: 'duplicate_image_stem', key, paths: [...images, ...jsonFiles].map(item => item.path) });
+                        continue;
+                    }
+                    if (jsonFiles.length > 1) {
+                        conflicts.push({ code: 'duplicate_json_stem', key, paths: [...images, ...jsonFiles].map(item => item.path) });
+                        continue;
+                    }
+                    if (images.length === 1 && jsonFiles.length === 1) {
+                        pairs.push(PairScanner.pairRecord(images[0], jsonFiles[0], false));
+                        usedImages.add(images[0].path);
+                        usedJson.add(jsonFiles[0].path);
+                    }
+                }
+
+                const conflictPaths = new Set(conflicts.flatMap(conflict => conflict.paths));
+                const imageByPath = new Map(formal.filter(item => item.kind === 'image').map(item => [item.path, item]));
+                const jsonByPath = new Map(formal.filter(item => item.kind === 'json').map(item => [item.path, item]));
+                for (const manual of manualPairs || []) {
+                    const image = imageByPath.get(manual.imagePath);
+                    const json = jsonByPath.get(manual.jsonPath);
+                    if (!image || !json) {
+                        errors.push({ code: 'manual_pair_missing_file', imagePath: manual.imagePath, jsonPath: manual.jsonPath });
+                        continue;
+                    }
+                    if (conflictPaths.has(image.path) || conflictPaths.has(json.path)) {
+                        errors.push({ code: 'manual_pair_conflict', imagePath: image.path, jsonPath: json.path });
+                        continue;
+                    }
+                    if (usedImages.has(image.path) || usedJson.has(json.path)) {
+                        errors.push({ code: 'manual_pair_reuse', imagePath: image.path, jsonPath: json.path });
+                        continue;
+                    }
+                    pairs.push(PairScanner.pairRecord(image, json, true));
+                    usedImages.add(image.path);
+                    usedJson.add(json.path);
+                }
+
+                const unmatchedImages = formal.filter(item => item.kind === 'image' && !usedImages.has(item.path) && !conflictPaths.has(item.path));
+                const unmatchedJson = formal.filter(item => item.kind === 'json' && !usedJson.has(item.path) && !conflictPaths.has(item.path));
+
+                const comparePath = (left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+                pairs.sort((left, right) => left.imagePath < right.imagePath ? -1 : left.imagePath > right.imagePath ? 1 : 0);
+                excluded.sort(comparePath);
+                unmatchedImages.sort(comparePath);
+                unmatchedJson.sort(comparePath);
+
+                return { rootName, datasetKey, formalPaths, pairs, excluded, ignored, conflicts, errors, unmatchedImages, unmatchedJson };
+            }
+        }
+
+        class ReviewStore {
+            static VERSION = '1.0';
+            static ROOT_INDEX_KEY = 'annotation-pair-review:root-index';
+
+            constructor(storage = localStorage) {
+                this.storage = storage;
+            }
+
+            createManifest(scan, reviews = {}, manualPairs = [], currentPairId = null) {
+                const pairById = new Map(scan.pairs.map(pair => [pair.id, pair]));
+                const normalizedReviews = {};
+                for (const [pairId, review] of Object.entries(reviews || {})) {
+                    const pair = pairById.get(pairId);
+                    if (!pair) continue;
+                    normalizedReviews[pairId] = { ...review, signature: pair.signature };
+                }
+                return {
+                    version: ReviewStore.VERSION,
+                    dataset: {
+                        key: scan.datasetKey,
+                        rootName: scan.rootName,
+                        formalPaths: [...scan.formalPaths]
+                    },
+                    pairs: scan.pairs.map(pair => ({
+                        id: pair.id,
+                        imagePath: pair.imagePath,
+                        jsonPath: pair.jsonPath,
+                        signature: pair.signature,
+                        manual: pair.manual
+                    })),
+                    reviews: normalizedReviews,
+                    manualPairs: [...(manualPairs || [])],
+                    currentPairId: currentPairId || null,
+                    updatedAt: new Date().toISOString()
+                };
+            }
+
+            save(scan, manifest) {
+                this.storage.setItem(scan.datasetKey, JSON.stringify(manifest));
+                let index = {};
+                try { index = JSON.parse(this.storage.getItem(ReviewStore.ROOT_INDEX_KEY) || '{}'); } catch (_) {}
+                const entries = Array.isArray(index[scan.rootName]) ? index[scan.rootName] : [];
+                index[scan.rootName] = [scan.datasetKey, ...entries.filter(key => key !== scan.datasetKey)].slice(0, 10);
+                this.storage.setItem(ReviewStore.ROOT_INDEX_KEY, JSON.stringify(index));
+                return manifest;
+            }
+
+            load(scan) {
+                const exact = this.storage.getItem(scan.datasetKey);
+                if (exact) {
+                    try { return { status: 'exact', manifest: JSON.parse(exact) }; }
+                    catch (_) { return { status: 'invalid', manifest: null }; }
+                }
+
+                let index = {};
+                try { index = JSON.parse(this.storage.getItem(ReviewStore.ROOT_INDEX_KEY) || '{}'); } catch (_) {}
+                const candidates = (index[scan.rootName] || [])
+                    .map(key => {
+                        try { return { key, manifest: JSON.parse(this.storage.getItem(key)) }; }
+                        catch (_) { return null; }
+                    })
+                    .filter(Boolean);
+                if (candidates.length === 1) return { status: 'candidate', ...candidates[0] };
+                if (candidates.length > 1) return { status: 'ambiguous', candidates };
+                return { status: 'none', manifest: null };
+            }
+
+            resume(scan, oldManifest) {
+                const currentPairs = new Map(scan.pairs.map(pair => [pair.id, pair]));
+                const reviews = {};
+                const stalePairIds = [];
+                for (const [pairId, review] of Object.entries(oldManifest?.reviews || {})) {
+                    const pair = currentPairs.get(pairId);
+                    if (pair && review.signature === pair.signature) reviews[pairId] = { ...review };
+                    else stalePairIds.push(pairId);
+                }
+                const currentPairId = currentPairs.has(oldManifest?.currentPairId) ? oldManifest.currentPairId : null;
+                return {
+                    manifest: this.createManifest(scan, reviews, oldManifest?.manualPairs || [], currentPairId),
+                    stalePairIds
+                };
+            }
+
+            static validateDecision(status, reason, note) {
+                if (status !== 'match' && status !== 'mismatch') return { ok: false, message: '請選擇相符或不相符。' };
+                if (status === 'mismatch' && !reason) return { ok: false, message: '不相符必須選擇原因。' };
+                if (status === 'mismatch' && reason === 'other' && !String(note || '').trim()) {
+                    return { ok: false, message: '原因選擇其他時必須填寫備註。' };
+                }
+                return { ok: true, message: '' };
+            }
+
+            static csvCell(value) {
+                const text = String(value ?? '');
+                return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+            }
+
+            static toCsv(rows) {
+                const columns = ['image_path', 'json_path', 'status', 'reason', 'note'];
+                const lines = [columns.join(',')];
+                for (const row of rows || []) {
+                    lines.push([
+                        row.imagePath,
+                        row.jsonPath,
+                        row.status,
+                        row.reason,
+                        row.note
+                    ].map(ReviewStore.csvCell).join(','));
+                }
+                return '\uFEFF' + lines.join('\r\n');
+            }
+        }
+
+        class BatchReviewController {
+            constructor(store = new ReviewStore()) {
+                this.store = store;
+                this.scan = null;
+                this.manifest = null;
+                this.manualPairs = [];
+                this.files = [];
+                this.currentIndex = 0;
+                this.loadToken = 0;
+            }
+
+            static escapeHtml(value) {
+                return String(value ?? '')
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;')
+                    .replaceAll('"', '&quot;')
+                    .replaceAll("'", '&#039;');
+            }
+
+            beginLoad() {
+                return ++this.loadToken;
+            }
+
+            isCurrentLoad(token) {
+                return token === this.loadToken;
+            }
+
+            currentPair() {
+                return this.scan?.pairs?.[this.currentIndex] || null;
+            }
+
+            start(fileList) {
+                this.files = Array.from(fileList || []);
+                const initialScan = PairScanner.scan(this.files, []);
+                const saved = this.store.load(initialScan);
+                let oldManifest = null;
+
+                if (saved.status === 'exact') {
+                    oldManifest = saved.manifest;
+                } else if (saved.status === 'candidate') {
+                    if (confirm('此資料夾的檔案清單已變更。是否保留檔案內容未變的既有審查結果？')) {
+                        oldManifest = saved.manifest;
+                    }
+                } else if (saved.status === 'ambiguous') {
+                    alert('找到多份同名資料夾的舊審查紀錄，為避免套錯資料，請使用「匯入審查紀錄」指定正確的 pair_review.json。');
+                } else if (saved.status === 'invalid') {
+                    alert('本機審查紀錄已損壞，將建立新的審查工作階段。');
+                }
+
+                this.manualPairs = Array.isArray(oldManifest?.manualPairs) ? [...oldManifest.manualPairs] : [];
+                this.scan = PairScanner.scan(this.files, this.manualPairs);
+                if (oldManifest) {
+                    this.manifest = this.store.resume(this.scan, oldManifest).manifest;
+                } else {
+                    this.manifest = this.store.createManifest(this.scan, {}, this.manualPairs, null);
+                }
+
+                const resumeId = this.manifest.currentPairId;
+                const resumeIndex = this.scan.pairs.findIndex(pair => pair.id === resumeId);
+                this.currentIndex = resumeIndex >= 0 ? resumeIndex : 0;
+                batchReviewMode = true;
+                this.store.save(this.scan, this.manifest);
+                this.render();
+                if (this.scan.pairs.length > 0) this.loadCurrentPair();
+                else this.clearDisplay('沒有可審查的有效配對。請先處理未配對或衝突檔案。');
+                return this.scan;
+            }
+
+            loadImportedManifest(imported) {
+                if (!imported || imported.version !== ReviewStore.VERSION || !imported.dataset) {
+                    alert('不是支援的 pair_review.json（需要 version 1.0）。');
+                    return false;
+                }
+                if (!this.files.length) {
+                    alert('請先選擇 Images 資料夾，再匯入審查紀錄。');
+                    return false;
+                }
+                const selectedRoot = PairScanner.scan(this.files, []).rootName;
+                if (imported.dataset.rootName !== selectedRoot) {
+                    alert(`審查紀錄屬於 ${imported.dataset.rootName}，目前選擇的是 ${selectedRoot}。為避免套錯資料，已拒絕匯入。`);
+                    return false;
+                }
+                this.manualPairs = Array.isArray(imported.manualPairs) ? [...imported.manualPairs] : [];
+                this.scan = PairScanner.scan(this.files, this.manualPairs);
+                const resumed = this.store.resume(this.scan, imported);
+                this.manifest = resumed.manifest;
+                const index = this.scan.pairs.findIndex(pair => pair.id === this.manifest.currentPairId);
+                this.currentIndex = index >= 0 ? index : 0;
+                this.store.save(this.scan, this.manifest);
+                if (resumed.stalePairIds.length > 0) {
+                    alert(`有 ${resumed.stalePairIds.length} 筆檔案內容已變更，這些審查結果已重設。`);
+                }
+                this.render();
+                if (this.scan.pairs.length > 0) this.loadCurrentPair();
+                return true;
+            }
+
+            recordDecision(status, reason = '', note = '', options = {}) {
+                const validation = ReviewStore.validateDecision(status, reason, note);
+                if (!validation.ok) {
+                    alert(validation.message);
+                    return false;
+                }
+                const pair = this.currentPair();
+                if (!pair || !this.manifest) return false;
+                this.manifest.reviews[pair.id] = {
+                    status,
+                    reason: status === 'mismatch' ? reason : '',
+                    note: String(note || '').trim(),
+                    reviewedAt: new Date().toISOString(),
+                    signature: pair.signature
+                };
+                this.manifest.currentPairId = pair.id;
+                this.manifest = this.store.createManifest(
+                    this.scan,
+                    this.manifest.reviews,
+                    this.manualPairs,
+                    pair.id
+                );
+                this.store.save(this.scan, this.manifest);
+
+                const shouldRender = options.render !== false;
+                const shouldAdvance = options.advance !== false;
+                if (shouldAdvance && this.scan.pairs.length > 1) {
+                    const next = this.findNextUnreviewed(this.currentIndex + 1);
+                    this.currentIndex = next >= 0 ? next : Math.min(this.currentIndex + 1, this.scan.pairs.length - 1);
+                    this.manifest.currentPairId = this.currentPair()?.id || null;
+                    this.store.save(this.scan, this.manifest);
+                    if (shouldRender) this.loadCurrentPair();
+                }
+                if (shouldRender) this.render();
+                return true;
+            }
+
+            findNextUnreviewed(startIndex = 0) {
+                for (let offset = 0; offset < this.scan.pairs.length; offset++) {
+                    const index = (startIndex + offset) % this.scan.pairs.length;
+                    if (!this.manifest.reviews[this.scan.pairs[index].id]) return index;
+                }
+                return -1;
+            }
+
+            navigate(delta) {
+                if (!this.scan?.pairs?.length) return;
+                this.currentIndex = Math.max(0, Math.min(this.scan.pairs.length - 1, this.currentIndex + delta));
+                this.manifest.currentPairId = this.currentPair().id;
+                this.store.save(this.scan, this.manifest);
+                this.render();
+                this.loadCurrentPair();
+            }
+
+            async loadCurrentPair() {
+                const pair = this.currentPair();
+                if (!pair) return;
+                const token = this.beginLoad();
+                document.getElementById('statusText').textContent = `載入中：${pair.imagePath}`;
+                try {
+                    const [image, jsonText] = await Promise.all([
+                        decodeImageFile(pair.imageFile),
+                        readTextFile(pair.jsonFile)
+                    ]);
+                    if (!this.isCurrentLoad(token)) return;
+                    const raw = JSON.parse(jsonText);
+                    const normalized = normalizeAnnotation(raw);
+                    normalized._fileName = pair.jsonPath;
+                    normalized._imageFileName = pair.imagePath;
+
+                    batchReviewMode = true;
+                    originalImage = image;
+                    annotationData = normalized;
+                    scaleX = 1;
+                    scaleY = 1;
+                    highlightVertebra = -1;
+                    document.getElementById('dropZone').classList.add('hidden');
+                    resetView();
+                    updateStatus();
+                    renderSidebar();
+                    this.populateDecisionFields();
+                    this.render();
+                } catch (error) {
+                    if (!this.isCurrentLoad(token)) return;
+                    this.clearDisplay(`無法載入配對：${error.message}`);
+                    document.getElementById('statusText').textContent = `載入失敗：${pair.imagePath}`;
+                    this.render();
+                }
+            }
+
+            clearDisplay(message) {
+                originalImage = null;
+                annotationData = null;
+                redraw();
+                document.getElementById('fileInfo').innerHTML = `<div class="empty-state">${BatchReviewController.escapeHtml(message)}</div>`;
+                document.getElementById('vertebraList').innerHTML = '<div class="empty-state">尚無資料</div>';
+                document.getElementById('discList').innerHTML = '<div class="empty-state">尚無資料</div>';
+                document.getElementById('alertList').innerHTML = '<div class="empty-state">尚無資料</div>';
+            }
+
+            populateDecisionFields() {
+                const review = this.manifest?.reviews?.[this.currentPair()?.id] || null;
+                document.getElementById('mismatchReason').value = review?.reason || '';
+                document.getElementById('mismatchNote').value = review?.note || '';
+            }
+
+            addManualPair(imagePath, jsonPath) {
+                if (!imagePath || !jsonPath) {
+                    alert('請同時選擇未配對影像與 JSON。');
+                    return false;
+                }
+                const candidate = [...this.manualPairs, { imagePath, jsonPath }];
+                const nextScan = PairScanner.scan(this.files, candidate);
+                const newErrors = nextScan.errors.filter(error => error.code.startsWith('manual_pair'));
+                if (newErrors.length > 0) {
+                    alert('人工配對無法建立：檔案不存在或已被其他配對使用。');
+                    return false;
+                }
+                const oldManifest = this.manifest;
+                this.manualPairs = candidate;
+                this.scan = nextScan;
+                this.manifest = this.store.resume(this.scan, oldManifest).manifest;
+                this.manifest.manualPairs = [...this.manualPairs];
+                this.currentIndex = Math.min(this.currentIndex, Math.max(0, this.scan.pairs.length - 1));
+                this.store.save(this.scan, this.manifest);
+                this.render();
+                this.loadCurrentPair();
+                return true;
+            }
+
+            reviewRows() {
+                return (this.scan?.pairs || []).map(pair => {
+                    const review = this.manifest?.reviews?.[pair.id] || {};
+                    return {
+                        imagePath: pair.imagePath,
+                        jsonPath: pair.jsonPath,
+                        status: review.status || 'unreviewed',
+                        reason: review.reason || '',
+                        note: review.note || ''
+                    };
+                });
+            }
+
+            download(content, filename, type) {
+                const blob = new Blob([content], { type });
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = filename;
+                anchor.click();
+                URL.revokeObjectURL(url);
+            }
+
+            exportJson() {
+                if (!this.manifest) return false;
+                this.download(JSON.stringify(this.manifest, null, 2), 'pair_review.json', 'application/json');
+                return true;
+            }
+
+            exportCsv() {
+                if (!this.manifest) return false;
+                this.download(ReviewStore.toCsv(this.reviewRows()), 'pair_review.csv', 'text/csv;charset=utf-8');
+                return true;
+            }
+
+            render() {
+                const panel = document.getElementById('batchReviewPanel');
+                if (!panel) return;
+                panel.hidden = !this.scan;
+                if (!this.scan) return;
+
+                const total = this.scan.pairs.length;
+                const reviews = this.manifest?.reviews || {};
+                const reviewed = Object.keys(reviews).length;
+                const matches = Object.values(reviews).filter(review => review.status === 'match').length;
+                const mismatches = Object.values(reviews).filter(review => review.status === 'mismatch').length;
+                const pair = this.currentPair();
+                document.getElementById('batchProgress').textContent =
+                    `${total ? this.currentIndex + 1 : 0}/${total}｜已審 ${reviewed}｜相符 ${matches}｜不相符 ${mismatches}`;
+                document.getElementById('batchPairName').innerHTML = pair
+                    ? `<strong>${BatchReviewController.escapeHtml(pair.imagePath)}</strong><br>${BatchReviewController.escapeHtml(pair.jsonPath)}${pair.manual ? '<br><em>人工配對</em>' : ''}`
+                    : '沒有有效配對';
+
+                const issueParts = [
+                    `缺 JSON：${this.scan.unmatchedImages.length}`,
+                    `缺影像：${this.scan.unmatchedJson.length}`,
+                    `衝突：${this.scan.conflicts.length}`,
+                    `排除 samp/ai/model：${this.scan.excluded.length}`
+                ];
+                if (this.scan.errors.length) issueParts.push(`人工配對錯誤：${this.scan.errors.length}`);
+                document.getElementById('batchIssues').textContent = issueParts.join('｜');
+
+                const imageSelect = document.getElementById('manualImageSelect');
+                const jsonSelect = document.getElementById('manualJsonSelect');
+                imageSelect.innerHTML = '<option value="">選擇未配對影像</option>' + this.scan.unmatchedImages
+                    .map(item => `<option value="${BatchReviewController.escapeHtml(item.path)}">${BatchReviewController.escapeHtml(item.path)}</option>`).join('');
+                jsonSelect.innerHTML = '<option value="">選擇未配對 JSON</option>' + this.scan.unmatchedJson
+                    .map(item => `<option value="${BatchReviewController.escapeHtml(item.path)}">${BatchReviewController.escapeHtml(item.path)}</option>`).join('');
+            }
+        }
+
+        const batchReviewController = new BatchReviewController();
 
         // Corner config
         const CORNER_CONFIG = {
@@ -270,6 +894,7 @@
 
             // Paste
             document.addEventListener('paste', handlePaste);
+            document.addEventListener('keydown', handleBatchShortcut);
 
             // Drag & drop
             const zone = document.getElementById('dropZone');
@@ -294,8 +919,103 @@
         }
 
         // ==================== File Handling ====================
-        function pickImage() { document.getElementById('imageInput').click(); }
-        function pickJson() { document.getElementById('jsonInput').click(); }
+        function exitBatchReviewMode() {
+            batchReviewMode = false;
+            batchReviewController.beginLoad();
+            const panel = document.getElementById('batchReviewPanel');
+            if (panel) panel.hidden = true;
+            updateScaleFactors();
+        }
+
+        function pickImage() { exitBatchReviewMode(); document.getElementById('imageInput').click(); }
+        function pickJson() { exitBatchReviewMode(); document.getElementById('jsonInput').click(); }
+        function pickReviewFolder() { document.getElementById('reviewFolderInput').click(); }
+        function pickReviewManifest() { document.getElementById('manifestInput').click(); }
+
+        function handleReviewFolder(event) {
+            const files = Array.from(event.target.files || []);
+            event.target.value = '';
+            if (files.length > 0) batchReviewController.start(files);
+        }
+
+        function handleReviewManifest(event) {
+            const file = event.target.files?.[0];
+            event.target.value = '';
+            if (!file) return;
+            readTextFile(file).then(text => {
+                try {
+                    batchReviewController.loadImportedManifest(JSON.parse(text));
+                } catch (error) {
+                    alert('審查紀錄 JSON 解析失敗：' + error.message);
+                }
+            }).catch(error => alert('審查紀錄讀取失敗：' + error.message));
+        }
+
+        function batchPrevious() { batchReviewController.navigate(-1); }
+        function batchNext() { batchReviewController.navigate(1); }
+        function markBatchMatch() { batchReviewController.recordDecision('match', '', document.getElementById('mismatchNote').value); }
+        function markBatchMismatch() {
+            batchReviewController.recordDecision(
+                'mismatch',
+                document.getElementById('mismatchReason').value,
+                document.getElementById('mismatchNote').value
+            );
+        }
+        function exportPairReviewJson() { batchReviewController.exportJson(); }
+        function exportPairReviewCsv() { batchReviewController.exportCsv(); }
+        function addManualPair() {
+            batchReviewController.addManualPair(
+                document.getElementById('manualImageSelect').value,
+                document.getElementById('manualJsonSelect').value
+            );
+        }
+
+        function handleBatchShortcut(event) {
+            if (!batchReviewMode || event.ctrlKey || event.metaKey || event.altKey) return;
+            const tag = String(event.target?.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            const key = event.key.toLowerCase();
+            if (key === 'm') markBatchMatch();
+            else if (key === 'x') markBatchMismatch();
+            else if (key === 'j') batchPrevious();
+            else if (key === 'k') batchNext();
+            else if (key === 's') exportPairReviewJson();
+            else return;
+            event.preventDefault();
+        }
+
+        function readTextFile(file) {
+            if (file && typeof file.text === 'function') return file.text();
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = event => resolve(event.target.result);
+                reader.onerror = () => reject(reader.error || new Error('檔案讀取失敗'));
+                reader.readAsText(file);
+            });
+        }
+
+        function decodeImageFile(file) {
+            return new Promise((resolve, reject) => {
+                const name = String(file?.name || '').toLowerCase();
+                const reader = new FileReader();
+                reader.onerror = () => reject(reader.error || new Error('影像檔案讀取失敗'));
+                if (name.endsWith('.dcm')) {
+                    reader.onload = event => {
+                        try { resolve(parseDicomToImage(event.target.result)); }
+                        catch (error) { reject(error); }
+                    };
+                    reader.readAsArrayBuffer(file);
+                    return;
+                }
+                reader.onload = event => {
+                    const image = new Image();
+                    image.onload = () => resolve(image);
+                    image.onerror = () => reject(new Error('影像解碼失敗'));
+                    image.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
 
         function handleImageFile(event) {
             if (event.target.files[0]) loadImageFile(event.target.files[0]);
@@ -305,6 +1025,7 @@
         }
 
         function handleDroppedFiles(files) {
+            exitBatchReviewMode();
             for (const f of files) {
                 const name = f.name.toLowerCase();
                 if (name.endsWith('.json')) {
@@ -321,6 +1042,7 @@
             if (!items) return;
             for (const item of items) {
                 if (item.type.startsWith('image/')) {
+                    exitBatchReviewMode();
                     loadImageFile(item.getAsFile());
                     return;
                 }
@@ -358,6 +1080,8 @@
             // If annotation JSON specifies imageInfo dimensions, compute scale
             // so annotation coordinates map correctly onto the loaded image
             scaleX = 1; scaleY = 1;
+            // 審查模式故意保留原始座標，避免自動縮放掩蓋裁切／尺寸錯配。
+            if (batchReviewMode) return;
             if (originalImage && annotationData && annotationData.imageInfo) {
                 const ai = annotationData.imageInfo;
                 if (ai.width && ai.height) {

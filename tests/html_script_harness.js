@@ -134,6 +134,7 @@ function loadHtmlScript(htmlPath, overrides = {}) {
   };
 
   const createdUrls = new Map();
+  const windowListeners = new Map();
   let urlCounter = 0;
   class FakeFileReader {
     readAsText(file) {
@@ -188,6 +189,14 @@ function loadHtmlScript(htmlPath, overrides = {}) {
     queueMicrotask,
     requestAnimationFrame: callback => callback(0),
     cancelAnimationFrame: () => {},
+    addEventListener(type, handler) {
+      if (!windowListeners.has(type)) windowListeners.set(type, []);
+      windowListeners.get(type).push(handler);
+    },
+    removeEventListener(type, handler) {
+      if (!windowListeners.has(type)) return;
+      windowListeners.set(type, windowListeners.get(type).filter(item => item !== handler));
+    },
     location: { search: '' },
     ...overrides,
   };

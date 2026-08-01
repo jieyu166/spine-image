@@ -270,3 +270,20 @@ test('JSON import cannot overwrite unsaved edits when the doctor cancels', () =>
   assert.deepEqual(page.snapshot('vertebrae.map(v => v.name)'), ['UNSAVED']);
   assert.equal(page.evaluate('annotationDirty'), true);
 });
+
+test('changing spine type clears stale selections and drag state with the annotations', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.evaluate(`
+    vertebrae = [{ name: 'L1', points: [] }];
+    selectedVertebrae.add(0);
+    dragInfo = { vertebraIdx: 0, pointIdx: 0 };
+    setSpineType('C');
+  `);
+  assert.deepEqual(page.snapshot('({ spineType, vertebrae, selectedCount: selectedVertebrae.size, dragInfo })'), {
+    spineType: 'C',
+    vertebrae: [],
+    selectedCount: 0,
+    dragInfo: null,
+  });
+});
