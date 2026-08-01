@@ -141,6 +141,13 @@ test('review store resumes exact datasets and retains only unchanged pair signat
   const exact = page.snapshot('__store.load(__scan)');
   assert.equal(exact.status, 'exact');
   assert.equal(Object.keys(exact.manifest.reviews).length, 2);
+  assert.deepEqual(exact.manifest.summary, {
+    totalPairs: 2,
+    reviewed: 2,
+    match: 1,
+    mismatch: 1,
+    pending: 0,
+  });
 
   const changedScan = scan(page, [
     fakeFile('Images/a.png', { size: 10 }), fakeFile('Images/a.json', { size: 20 }),
@@ -167,10 +174,13 @@ test('mismatch reason validation and CSV export are doctor-friendly', () => {
     status: 'mismatch',
     reason: 'other',
     note: 'comma, quote " and newline\ntext',
+    manual: true,
+    reviewedAt: '2026-08-02T00:00:00.000Z',
   }];
   const csv = page.evaluate('ReviewStore.toCsv(__rows)');
-  assert.ok(csv.startsWith('\uFEFFimage_path,json_path,status,reason,note'));
+  assert.ok(csv.startsWith('\uFEFFimage_path,json_path,status,reason,note,manual,reviewed_at'));
   assert.ok(csv.includes('"comma, quote "" and newline\ntext"'));
+  assert.ok(csv.includes(',true,2026-08-02T00:00:00.000Z'));
 });
 
 test('batch mode renders raw JSON coordinates so dimension mismatch remains visible', () => {
@@ -203,6 +213,23 @@ test('controller records validated decisions and ignores stale async load tokens
   assert.equal(page.evaluate("__controller.recordDecision('mismatch', '', '', { render: false, advance: false })"), false);
   assert.equal(page.evaluate("__controller.recordDecision('match', '', '', { render: false, advance: false })"), true);
   assert.equal(page.evaluate("__controller.manifest.reviews[__scan.pairs[0].id].status"), 'match');
+});
+
+test('skip leaves the pair pending and advances without writing a decision', () => {
+  const page = loadHtmlScript(pagePath);
+  const currentScan = scan(page, [
+    fakeFile('Images/a.png'), fakeFile('Images/a.json'),
+    fakeFile('Images/b.png'), fakeFile('Images/b.json'),
+  ]);
+  page.context.__scan = currentScan;
+  page.evaluate(`
+    __skipController = new BatchReviewController(new ReviewStore(localStorage));
+    __skipController.scan = __scan;
+    __skipController.manifest = __skipController.store.createManifest(__scan, {}, [], __scan.pairs[0].id);
+  `);
+  assert.equal(page.evaluate('__skipController.skip({ render: false })'), true);
+  assert.equal(page.evaluate('__skipController.currentIndex'), 1);
+  assert.equal(page.evaluate('Object.keys(__skipController.manifest.reviews).length'), 0);
 });
 
 test('batch review controls are present in the standalone HTML', () => {

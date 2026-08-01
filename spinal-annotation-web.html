@@ -1102,9 +1102,10 @@
 
         // ==================== 脊椎類型 ====================
         function setSpineType(type) {
-            if (vertebrae.length > 0) {
+            if (vertebrae.length > 0 || currentPoints.length > 0) {
                 if (!confirm('切換脊椎類型會清除現有標註，確定嗎？')) return;
                 resetCaseState({ keepImage: true });
+                markAnnotationDirty();
             }
             spineType = type;
             document.querySelectorAll('.spine-type-btn').forEach(btn => {
@@ -1122,6 +1123,7 @@
                     return;
                 }
                 resetCaseState({ keepImage: true });
+                markAnnotationDirty();
             }
             endplatePointMode = mode;
             updateEndplateModeUI();
@@ -1361,6 +1363,7 @@
         function clearAll() {
             if (confirm('確定清除所有標註？')) {
                 resetCaseState({ keepImage: true });
+                markAnnotationDirty();
                 redraw();
                 updateUI();
             }
@@ -1593,6 +1596,7 @@
             // 標記為已完成 (匯入的標註可直接編輯)
             annotationFinished = true;
             endplatePointMode = 3; // 匯入後以 3 點模式顯示
+            markAnnotationDirty();
 
             redraw();
             updateUI();

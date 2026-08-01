@@ -218,8 +218,8 @@
                     <div class="batch-progress" id="batchProgress">尚未載入資料夾</div>
                     <div class="batch-pair-name" id="batchPairName">—</div>
                     <div class="batch-actions">
-                        <button class="btn-secondary" onclick="batchPrevious()">← 上一筆 (J)</button>
-                        <button class="btn-secondary" onclick="batchNext()">下一筆 (K) →</button>
+                        <button class="btn-secondary" onclick="batchPrevious()">← 上一筆 (K)</button>
+                        <button class="btn-secondary" onclick="batchNext()">下一筆 (J) →</button>
                     </div>
                     <select class="batch-field" id="mismatchReason" aria-label="不相符原因">
                         <option value="">選擇不相符原因（必填）</option>
@@ -234,9 +234,10 @@
                     <div class="batch-actions">
                         <button class="decision-match" onclick="markBatchMatch()">✓ 相符 (M)</button>
                         <button class="decision-mismatch" onclick="markBatchMismatch()">✗ 不相符 (X)</button>
+                        <button class="btn-secondary" onclick="skipBatchPair()">略過 (S)</button>
                     </div>
                     <div class="batch-actions">
-                        <button class="btn-secondary" onclick="exportPairReviewJson()">匯出 pair_review.json (S)</button>
+                        <button class="btn-secondary" onclick="exportPairReviewJson()">匯出 pair_review.json</button>
                         <button class="btn-secondary" onclick="exportPairReviewCsv()">匯出 pair_review.csv</button>
                         <button class="btn-secondary" onclick="pickReviewManifest()">匯入審查紀錄</button>
                     </div>
@@ -246,7 +247,7 @@
                     <div class="batch-actions">
                         <button class="btn-secondary" onclick="addManualPair()">建立人工配對</button>
                     </div>
-                    <div class="batch-help">快捷鍵：M 相符、X 不相符、J/K 上一／下一筆、S 匯出 JSON。批次模式不會自動縮放 JSON 座標，尺寸錯配會原樣顯示。</div>
+                    <div class="batch-help">快捷鍵：M 相符、X 不相符、J/→ 下一筆、K/← 上一筆、S 略過。批次模式不會自動縮放 JSON 座標，尺寸錯配會原樣顯示。</div>
                 </div>
                 <div class="section">
                     <div class="section-title">📄 檔案資訊</div>
@@ -457,6 +458,14 @@
                     if (!pair) continue;
                     normalizedReviews[pairId] = { ...review, signature: pair.signature };
                 }
+                const reviewValues = Object.values(normalizedReviews);
+                const summary = {
+                    totalPairs: scan.pairs.length,
+                    reviewed: reviewValues.length,
+                    match: reviewValues.filter(review => review.status === 'match').length,
+                    mismatch: reviewValues.filter(review => review.status === 'mismatch').length,
+                    pending: Math.max(0, scan.pairs.length - reviewValues.length)
+                };
                 return {
                     version: ReviewStore.VERSION,
                     dataset: {
@@ -472,6 +481,14 @@
                         manual: pair.manual
                     })),
                     reviews: normalizedReviews,
+                    summary,
+                    issues: {
+                        unmatchedImages: scan.unmatchedImages.map(item => item.path),
+                        unmatchedJson: scan.unmatchedJson.map(item => item.path),
+                        conflicts: scan.conflicts,
+                        excluded: scan.excluded.map(item => item.path),
+                        errors: scan.errors
+                    },
                     manualPairs: [...(manualPairs || [])],
                     currentPairId: currentPairId || null,
                     updatedAt: new Date().toISOString()
@@ -539,7 +556,7 @@
             }
 
             static toCsv(rows) {
-                const columns = ['image_path', 'json_path', 'status', 'reason', 'note'];
+                const columns = ['image_path', 'json_path', 'status', 'reason', 'note', 'manual', 'reviewed_at'];
                 const lines = [columns.join(',')];
                 for (const row of rows || []) {
                     lines.push([
@@ -547,7 +564,9 @@
                         row.jsonPath,
                         row.status,
                         row.reason,
-                        row.note
+                        row.note,
+                        row.manual,
+                        row.reviewedAt
                     ].map(ReviewStore.csvCell).join(','));
                 }
                 return '\uFEFF' + lines.join('\r\n');
@@ -706,6 +725,20 @@
                 this.loadCurrentPair();
             }
 
+            skip(options = {}) {
+                if (!this.scan?.pairs?.length) return false;
+                if (this.scan.pairs.length > 1) {
+                    this.currentIndex = (this.currentIndex + 1) % this.scan.pairs.length;
+                }
+                this.manifest.currentPairId = this.currentPair().id;
+                this.store.save(this.scan, this.manifest);
+                if (options.render !== false) {
+                    this.render();
+                    this.loadCurrentPair();
+                }
+                return true;
+            }
+
             async loadCurrentPair() {
                 const pair = this.currentPair();
                 if (!pair) return;
@@ -790,7 +823,9 @@
                         jsonPath: pair.jsonPath,
                         status: review.status || 'unreviewed',
                         reason: review.reason || '',
-                        note: review.note || ''
+                        note: review.note || '',
+                        manual: pair.manual,
+                        reviewedAt: review.reviewedAt || ''
                     };
                 });
             }
@@ -842,7 +877,15 @@
                     `排除 samp/ai/model：${this.scan.excluded.length}`
                 ];
                 if (this.scan.errors.length) issueParts.push(`人工配對錯誤：${this.scan.errors.length}`);
-                document.getElementById('batchIssues').textContent = issueParts.join('｜');
+                const detailSections = [
+                    ['缺 JSON 的影像', this.scan.unmatchedImages.map(item => item.path)],
+                    ['缺影像的 JSON', this.scan.unmatchedJson.map(item => item.path)],
+                    ['排除項目', this.scan.excluded.map(item => item.path)],
+                    ['衝突項目', this.scan.conflicts.flatMap(item => item.paths || [])]
+                ].filter(([, paths]) => paths.length > 0)
+                 .map(([title, paths]) => `<details><summary>${BatchReviewController.escapeHtml(title)}（${paths.length}）</summary>${paths.map(item => `<div>${BatchReviewController.escapeHtml(item)}</div>`).join('')}</details>`)
+                 .join('');
+                document.getElementById('batchIssues').innerHTML = `${BatchReviewController.escapeHtml(issueParts.join('｜'))}${detailSections}`;
 
                 const imageSelect = document.getElementById('manualImageSelect');
                 const jsonSelect = document.getElementById('manualJsonSelect');
@@ -953,7 +996,7 @@
 
         function batchPrevious() { batchReviewController.navigate(-1); }
         function batchNext() { batchReviewController.navigate(1); }
-        function markBatchMatch() { batchReviewController.recordDecision('match', '', document.getElementById('mismatchNote').value); }
+        function markBatchMatch() { batchReviewController.recordDecision('match', '', ''); }
         function markBatchMismatch() {
             batchReviewController.recordDecision(
                 'mismatch',
@@ -961,6 +1004,7 @@
                 document.getElementById('mismatchNote').value
             );
         }
+        function skipBatchPair() { batchReviewController.skip(); }
         function exportPairReviewJson() { batchReviewController.exportJson(); }
         function exportPairReviewCsv() { batchReviewController.exportCsv(); }
         function addManualPair() {
@@ -977,9 +1021,9 @@
             const key = event.key.toLowerCase();
             if (key === 'm') markBatchMatch();
             else if (key === 'x') markBatchMismatch();
-            else if (key === 'j') batchPrevious();
-            else if (key === 'k') batchNext();
-            else if (key === 's') exportPairReviewJson();
+            else if (key === 'j' || event.key === 'ArrowRight') batchNext();
+            else if (key === 'k' || event.key === 'ArrowLeft') batchPrevious();
+            else if (key === 's') skipBatchPair();
             else return;
             event.preventDefault();
         }

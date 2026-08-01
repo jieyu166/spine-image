@@ -108,6 +108,7 @@ test('clear all removes interaction state but keeps the current image', () => {
     dragInfo: null,
     selectedCount: 0,
   });
+  assert.equal(page.evaluate('annotationDirty'), true);
 });
 
 test('choosing the same image file twice is possible because the input value is cleared', () => {
@@ -200,6 +201,14 @@ test('matching filename, dimensions, and hash pass strict annotation identity va
   assert.deepEqual(result.errors, []);
 });
 
+test('imported annotations are marked unsaved until re-exported', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.context.__annotation = matchingAnnotation();
+  assert.equal(page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })"), true);
+  assert.equal(page.evaluate('annotationDirty'), true);
+});
+
 test('dimension mismatch rejects import without mutating the current annotations', () => {
   const page = loadHtmlScript(pagePath);
   loadCase(page);
@@ -280,10 +289,22 @@ test('changing spine type clears stale selections and drag state with the annota
     dragInfo = { vertebraIdx: 0, pointIdx: 0 };
     setSpineType('C');
   `);
-  assert.deepEqual(page.snapshot('({ spineType, vertebrae, selectedCount: selectedVertebrae.size, dragInfo })'), {
+  assert.deepEqual(page.snapshot('({ spineType, vertebrae, selectedCount: selectedVertebrae.size, dragInfo, annotationDirty })'), {
     spineType: 'C',
     vertebrae: [],
     selectedCount: 0,
     dragInfo: null,
+    annotationDirty: true,
+  });
+});
+
+test('changing spine type also clears an unfinished current vertebra', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.evaluate("currentPoints = [{ x: 1, y: 2 }]; setSpineType('C')");
+  assert.deepEqual(page.snapshot('({ spineType, currentPoints, annotationDirty })'), {
+    spineType: 'C',
+    currentPoints: [],
+    annotationDirty: true,
   });
 });
