@@ -308,3 +308,65 @@ test('changing spine type also clears an unfinished current vertebra', () => {
     annotationDirty: true,
   });
 });
+
+test('export carries default case flags: complete, no implant', async () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.context.__annotation = matchingAnnotation();
+  page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
+  page.evaluate('annotationDirty = true; exportData()');
+  const exported = JSON.parse(await page.downloads[0].blob.text());
+  assert.deepEqual(exported.caseFlags, {
+    hasImplant: false, implantNote: '', annotationComplete: true, truncatedReason: null,
+  });
+});
+
+test('implant checkbox and early finish are exported and mark the case unsaved', async () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.context.__annotation = matchingAnnotation({ vertebrae: [
+    { name: 'C2', boundaryType: 'lower', points: { anteriorInferior: { x: 1, y: 2 }, middleInferior: { x: 2, y: 2 }, posteriorInferior: { x: 3, y: 2 } } },
+    { name: 'C3', points: { anteriorSuperior: { x: 1, y: 4 }, posteriorSuperior: { x: 3, y: 4 }, posteriorInferior: { x: 3, y: 6 }, anteriorInferior: { x: 1, y: 6 } } },
+  ], spineType: 'C' });
+  page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
+  page.evaluate('annotationDirty = false');
+  page.evaluate("setCaseImplant(true); setImplantNote(' C4-C5 ACDF ')");
+  assert.equal(page.evaluate('annotationDirty'), true);
+  page.evaluate('finishEarly()');
+  assert.equal(page.evaluate('finishedEarly'), true);
+  page.evaluate('exportData()');
+  const exported = JSON.parse(await page.downloads[0].blob.text());
+  assert.deepEqual(exported.caseFlags, {
+    hasImplant: true, implantNote: 'C4-C5 ACDF', annotationComplete: false, truncatedReason: 'obscured',
+  });
+});
+
+test('undoing a vertebra after an early finish resumes a complete annotation', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.context.__annotation = matchingAnnotation({ vertebrae: [
+    { name: 'C2', boundaryType: 'lower', points: { anteriorInferior: { x: 1, y: 2 }, middleInferior: { x: 2, y: 2 }, posteriorInferior: { x: 3, y: 2 } } },
+    { name: 'C3', points: { anteriorSuperior: { x: 1, y: 4 }, posteriorSuperior: { x: 3, y: 4 }, posteriorInferior: { x: 3, y: 6 }, anteriorInferior: { x: 1, y: 6 } } },
+  ], spineType: 'C' });
+  page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
+  page.evaluate('finishEarly()');
+  page.evaluate('undoPoint()');
+  assert.equal(page.evaluate('finishedEarly'), false);
+  assert.equal(page.evaluate('getCaseFlags().annotationComplete'), true);
+});
+
+test('importing JSON restores case flags and reset clears them', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  page.context.__annotation = matchingAnnotation({
+    caseFlags: { hasImplant: true, implantNote: 'L4-L5 cage', annotationComplete: false, truncatedReason: 'other' },
+  });
+  page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
+  assert.deepEqual(page.snapshot('getCaseFlags()'), {
+    hasImplant: true, implantNote: 'L4-L5 cage', annotationComplete: false, truncatedReason: 'other',
+  });
+  page.evaluate('resetCaseState()');
+  assert.deepEqual(page.snapshot('getCaseFlags()'), {
+    hasImplant: false, implantNote: '', annotationComplete: true, truncatedReason: null,
+  });
+});

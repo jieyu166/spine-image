@@ -214,6 +214,12 @@ pip install albumentations==1.3.1   # 1.4+ 在 Python 3.14 有安裝問題
 # 2. 重生 train/val split（從 Images/ 掃描配對）
 python regenerate_splits.py --group-regex '(?:^|/)(\d{8}|[CL]\d{5})[^/]*$'
 
+# Reviewed-only cohort: build a SHA-256-locked allowlist from physician review.
+python build_training_allowlist.py --review-manifest Images/20260802pair_review.json --output endplate_training_data/manifests/training_allowlist_20260802.json --approve-stem 20285873L1 --approve-stem 81340744 --approve-stem 52780208 --approve-stem 80324056
+
+# Preview the patient-grouped split without changing train/val JSON.
+python regenerate_splits.py --allowlist endplate_training_data/manifests/training_allowlist_20260802.json --group-regex '(?:^|/)(\d{8}|[CL]\d{5})[^/]*$' --dry-run
+
 # 3. 訓練（單模型）
 python train_vertebra_model.py --epochs 30 --unfreeze-epoch 5
 

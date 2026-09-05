@@ -27,6 +27,8 @@ import sys
 import warnings
 from pathlib import Path
 
+from build_training_allowlist import file_sha256
+
 
 IMAGE_EXTS = ('.dcm', '.png', '.jpg', '.jpeg')
 COMPARISON_STEM_SUFFIXES = ('ai', 'model')
@@ -40,6 +42,8 @@ VAL_FILE = ANN_DIR / 'val_annotations.json'
 def is_ignored_image_stem(stem: str, directory: Path) -> bool:
     """Return whether a stem is a physician/model comparison artifact."""
     lowered = stem.lower()
+    if lowered.endswith('pair_review') or lowered.endswith('case_flags'):
+        return True
     if lowered.endswith('samp'):
         return True
     for suffix in COMPARISON_STEM_SUFFIXES:
@@ -135,6 +139,54 @@ def find_paired_samples():
     return scan_samples()[0]
 
 
+def _normalized_relative(path: str) -> str:
+    return path.replace('\\', '/').lstrip('./')
+
+
+def filter_pairs_by_allowlist(
+    pairs: list[tuple[str, Path]],
+    allowlist_path: Path,
+) -> list[tuple[str, Path]]:
+    """Validate a hash-locked allowlist and return exactly its scanned pairs."""
+    with Path(allowlist_path).open('r', encoding='utf-8') as stream:
+        allowlist = json.load(stream)
+    if allowlist.get('version') != '1.0':
+        raise ValueError(
+            f"unsupported training allowlist version: {allowlist.get('version')!r}"
+        )
+    entries = allowlist.get('entries')
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("training allowlist entries must be a non-empty list")
+
+    pair_index: dict[tuple[str, str], tuple[str, Path]] = {}
+    for image_path, annotation_path in pairs:
+        key = (
+            _normalized_relative(image_path),
+            annotation_path.resolve().relative_to(ROOT.resolve()).as_posix(),
+        )
+        pair_index[key] = (image_path, annotation_path)
+
+    selected_keys: set[tuple[str, str]] = set()
+    for entry in entries:
+        image = entry.get('image', {})
+        annotation = entry.get('annotation', {})
+        image_path = _normalized_relative(str(image.get('path', '')))
+        json_path = _normalized_relative(str(annotation.get('path', '')))
+        key = (image_path, json_path)
+        if key in selected_keys:
+            raise ValueError(f"duplicate allowlist pair: {image_path} / {json_path}")
+        if key not in pair_index:
+            raise ValueError(f"allowlist pair missing from scan: {image_path} / {json_path}")
+
+        if file_sha256(ROOT / image_path) != image.get('sha256'):
+            raise ValueError(f"stale allowlist hash for {image_path}")
+        if file_sha256(ROOT / json_path) != annotation.get('sha256'):
+            raise ValueError(f"stale allowlist hash for {json_path}")
+        selected_keys.add(key)
+
+    return [pair for key, pair in pair_index.items() if key in selected_keys]
+
+
 def warn_if_no_grouping(group_key: str | None, group_regex: str | None) -> None:
     """沒有可靠 grouping 時發出醒目告警，不從檔名自行猜病人 ID。"""
     if not group_key and not group_regex:
@@ -206,6 +258,72 @@ def split_entries(
     return shuffled[n_val:], shuffled[:n_val]
 
 
+def case_flags(entry: dict) -> dict:
+    """讀取標註工具匯出的病例旗標；舊 JSON 沒有 caseFlags 時回傳預設值。"""
+    flags = entry.get('caseFlags')
+    flags = flags if isinstance(flags, dict) else {}
+    return {
+        'has_implant': bool(flags.get('hasImplant', False)),
+        'annotation_complete': flags.get('annotationComplete', True) is not False,
+        'truncated_reason': flags.get('truncatedReason'),
+    }
+
+
+def load_case_flags_manifest(path: Path) -> dict[str, dict]:
+    """讀 annotation-viewer.html 批次審查匯出的 case_flags.json，回傳 {normalized image_path: flags}。"""
+    data = json.loads(Path(path).read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or data.get('kind') != 'case_flags' or not isinstance(data.get('entries'), list):
+        raise ValueError(f"{path} 不是 case_flags.json（需要 kind='case_flags' 與 entries 陣列）")
+    manifest: dict[str, dict] = {}
+    for item in data['entries']:
+        image_path = _normalized_relative(str(item.get('imagePath', '')))
+        if not image_path:
+            continue
+        if image_path in manifest:
+            raise ValueError(f"case_flags.json 重複 imagePath: {image_path}")
+        manifest[image_path] = {
+            'hasImplant': bool(item.get('hasImplant', False)),
+            'implantNote': str(item.get('implantNote', '') or ''),
+        }
+    return manifest
+
+
+def apply_case_flags_manifest(entries: list[dict], manifest: dict[str, dict]) -> dict:
+    """把側檔旗標合併進 entry['caseFlags']（側檔優先於 JSON 自帶值），回傳統計。"""
+    summary = {'applied': 0, 'unmatched': sorted(manifest)}
+    for entry in entries:
+        key = _normalized_relative(str(entry.get('image_path', '')))
+        flags = manifest.get(key)
+        if flags is None:
+            continue
+        existing = entry.get('caseFlags')
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged['hasImplant'] = flags['hasImplant']
+        merged['implantNote'] = flags['implantNote']
+        merged.setdefault('annotationComplete', True)
+        merged.setdefault('truncatedReason', None)
+        merged['flagSource'] = 'case_flags.json'
+        entry['caseFlags'] = merged
+        summary['applied'] += 1
+        summary['unmatched'].remove(key)
+    return summary
+
+
+def filter_entries_by_flags(entries: list[dict], exclude_implant: bool = False) -> tuple[list[dict], dict]:
+    """依病例旗標篩選；回傳 (保留的 entries, 統計)。"""
+    kept: list[dict] = []
+    summary = {'implant': 0, 'incomplete': 0, 'excluded_implant': 0}
+    for entry in entries:
+        flags = case_flags(entry)
+        summary['implant'] += int(flags['has_implant'])
+        summary['incomplete'] += int(not flags['annotation_complete'])
+        if exclude_implant and flags['has_implant']:
+            summary['excluded_implant'] += 1
+            continue
+        kept.append(entry)
+    return kept, summary
+
+
 def build_annotation_entry(image_rel_path: str, json_path: Path) -> dict | None:
     """把單一 standalone JSON 轉成 dataset annotation entry。"""
     try:
@@ -243,6 +361,21 @@ def main():
         help='從 image_path 擷取 group；第一個 capture group 為 group ID',
     )
     ap.add_argument('--dry-run', action='store_true', help='只印報告，不寫檔')
+    ap.add_argument(
+        '--case-flags',
+        type=Path,
+        help='annotation-viewer 匯出的 case_flags.json；預設自動讀 Images/case_flags.json',
+    )
+    ap.add_argument(
+        '--exclude-implant',
+        action='store_true',
+        help='排除 caseFlags.hasImplant=true 的病例（植入物另外訓練/評估）',
+    )
+    ap.add_argument(
+        '--allowlist',
+        type=Path,
+        help='hash-locked training allowlist; only listed pairs are used',
+    )
     args = ap.parse_args()
 
     print(f"Scanning {IMAGES_DIR} ...")
@@ -254,12 +387,30 @@ def main():
         f"重複 image {scan_summary['duplicates']}"
     )
 
+    if args.allowlist:
+        pairs = filter_pairs_by_allowlist(pairs, args.allowlist)
+        print(f"Allowlist selected {len(pairs)} validated pairs")
+
     entries: list[dict] = []
     for img_rel, json_path in pairs:
         e = build_annotation_entry(img_rel, json_path)
         if e is not None:
             entries.append(e)
     print(f"成功建立 {len(entries)} 個 annotation entries")
+    case_flags_path = args.case_flags or (IMAGES_DIR / 'case_flags.json')
+    if Path(case_flags_path).exists():
+        flags_manifest = load_case_flags_manifest(Path(case_flags_path))
+        applied = apply_case_flags_manifest(entries, flags_manifest)
+        print(f"合併 case_flags.json ({case_flags_path}): 套用 {applied['applied']} 筆"
+              + (f"，未對到影像 {len(applied['unmatched'])} 筆: {applied['unmatched'][:5]}" if applied['unmatched'] else ""))
+    elif args.case_flags:
+        print(f"ERROR: --case-flags {args.case_flags} 不存在")
+        return 1
+    entries, flag_summary = filter_entries_by_flags(entries, exclude_implant=args.exclude_implant)
+    print(
+        f"病例旗標: 植入物 {flag_summary['implant']} / 提前結束(GT 截斷) {flag_summary['incomplete']}"
+        + (f" / 已排除植入物 {flag_summary['excluded_implant']}" if args.exclude_implant else "")
+    )
 
     # 預設維持 sample-level split；有可靠 ID 時可明確選擇病人級 grouping。
     warn_if_no_grouping(args.group_key, args.group_regex)
@@ -282,7 +433,7 @@ def main():
 
     if args.dry_run:
         print("\n[dry-run] 不寫檔。")
-        return
+        return 0
 
     ANN_DIR.mkdir(parents=True, exist_ok=True)
     for src in (TRAIN_FILE, VAL_FILE):
@@ -301,6 +452,7 @@ def main():
     )
     print(f"\n寫入 {TRAIN_FILE.relative_to(ROOT)} ({len(train_entries)} 樣本)")
     print(f"寫入 {VAL_FILE.relative_to(ROOT)} ({len(val_entries)} 樣本)")
+    return 0
 
 
 if __name__ == '__main__':

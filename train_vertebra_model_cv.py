@@ -36,7 +36,9 @@ import argparse
 import json
 import os
 import re
-import shutil
+import time
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -143,6 +145,63 @@ def load_all_annotations(train_path, val_path):
     return train_anns + val_anns
 
 
+def archive_fold_artifact(source, destination, attempts=30, delay_seconds=1.0):
+    """Atomically archive a fold artifact, retrying transient Windows locks."""
+    source = Path(source)
+    destination = Path(destination)
+    if not source.exists():
+        return False
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(source, destination)
+            return True
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            print(
+                f"Artifact temporarily locked; retrying {source.name} "
+                f"({attempt}/{attempts})"
+            )
+            time.sleep(delay_seconds)
+
+
+def load_completed_fold_results(result_path, expected_folds):
+    """Restore completed fold histories from a partial CV summary."""
+    result_path = Path(result_path)
+    with result_path.open('r', encoding='utf-8') as f:
+        summary = json.load(f)
+
+    recorded_total = summary.get('n_folds_total')
+    completed = summary.get('n_folds_completed')
+    best_losses = summary.get('fold_best_val_losses', [])
+    histories = summary.get('per_fold_history', [])
+    if recorded_total != expected_folds:
+        raise ValueError(
+            f"resume result was configured for {recorded_total} folds; "
+            f"expected {expected_folds}"
+        )
+    if (
+        not isinstance(completed, int)
+        or completed < 0
+        or completed > expected_folds
+        or completed != len(best_losses)
+        or completed != len(histories)
+    ):
+        raise ValueError("resume result history is inconsistent")
+
+    return [
+        {
+            'best_val_loss': best_losses[index],
+            'train_losses': histories[index].get('train_losses', []),
+            'val_losses': histories[index].get('val_losses', []),
+        }
+        for index in range(completed)
+    ]
+
+
 def run_one_fold(fold_idx, n_folds, train_anns, val_anns, config, device):
     print(f"\n{'=' * 60}")
     print(f"=== Fold {fold_idx + 1}/{n_folds} ===")
@@ -188,10 +247,14 @@ def run_one_fold(fold_idx, n_folds, train_anns, val_anns, config, device):
 
     # 把 fold 產物改名避免被下一 fold 覆蓋
     fold_label = f"fold{fold_idx + 1}"
-    if os.path.exists('best_vertebra_model.pth'):
-        shutil.move('best_vertebra_model.pth', f'best_vertebra_model_{fold_label}.pth')
-    if os.path.exists('training_loss_curve.png'):
-        shutil.move('training_loss_curve.png', f'training_loss_curve_{fold_label}.png')
+    archive_fold_artifact(
+        'best_vertebra_model.pth',
+        f'best_vertebra_model_{fold_label}.pth',
+    )
+    archive_fold_artifact(
+        'training_loss_curve.png',
+        f'training_loss_curve_{fold_label}.png',
+    )
 
     return {
         'best_val_loss': trainer.best_val_loss,
@@ -219,6 +282,11 @@ def parse_args():
     parser.add_argument('--val-annotations', type=str,
                         default='endplate_training_data/annotations/val_annotations.json')
     parser.add_argument('--output', type=str, default='cv_results.json')
+    parser.add_argument(
+        '--resume-results',
+        type=str,
+        help='Existing partial cv_results.json; completed folds are skipped',
+    )
     parser.add_argument(
         '--group-regex',
         default=DEFAULT_GROUP_REGEX,
@@ -263,7 +331,13 @@ def main():
     all_anns = load_all_annotations(config['train_annotations'], config['val_annotations'])
     print(f"Total samples: {len(all_anns)}")
 
-    fold_results = []
+    if args.resume_results:
+        fold_results = load_completed_fold_results(
+            args.resume_results, expected_folds=args.n_folds
+        )
+        print(f"Resuming after {len(fold_results)} completed fold(s)")
+    else:
+        fold_results = []
     if args.sample_level_folds:
         print("WARNING: sample-level folds enabled; patient leakage is possible")
         fold_iterator = manual_kfold(
@@ -278,6 +352,9 @@ def main():
         )
 
     for fold_idx, (train_idx, val_idx) in enumerate(fold_iterator):
+        if fold_idx < len(fold_results):
+            print(f"Skipping completed Fold {fold_idx + 1}/{args.n_folds}")
+            continue
         train_fold = [all_anns[i] for i in train_idx]
         val_fold = [all_anns[i] for i in val_idx]
         result = run_one_fold(fold_idx, args.n_folds, train_fold, val_fold, config, device)

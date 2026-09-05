@@ -39,6 +39,74 @@ test('viewer initializes with batch controls in a browser-like environment', () 
   assert.equal(page.evaluate('canvas !== null && ctx !== null'), true);
 });
 
+test('six-point vertebra outline follows both superior and inferior middle points', () => {
+  const page = loadHtmlScript(pagePath);
+  page.evaluate(`
+    scaleX = 1;
+    scaleY = 1;
+    __outlineCalls = [];
+    ctx = {
+      beginPath() {},
+      moveTo(x, y) { __outlineCalls.push(['M', x, y]); },
+      lineTo(x, y) { __outlineCalls.push(['L', x, y]); },
+      closePath() { __outlineCalls.push(['Z']); },
+      stroke() {},
+    };
+    drawVertebra({
+      points: {
+        anteriorSuperior: { x: 10, y: 10 },
+        middleSuperior: { x: 20, y: 8 },
+        posteriorSuperior: { x: 30, y: 10 },
+        posteriorInferior: { x: 30, y: 30 },
+        middleInferior: { x: 20, y: 32 },
+        anteriorInferior: { x: 10, y: 30 },
+      },
+    }, 0, false, true, false, false);
+  `);
+
+  assert.deepEqual(page.snapshot('__outlineCalls'), [
+    ['M', 10, 10],
+    ['L', 20, 8],
+    ['L', 30, 10],
+    ['L', 30, 30],
+    ['L', 20, 32],
+    ['L', 10, 30],
+    ['Z'],
+  ]);
+});
+
+test('legacy four-point vertebra keeps the quadrilateral outline order', () => {
+  const page = loadHtmlScript(pagePath);
+  page.evaluate(`
+    scaleX = 1;
+    scaleY = 1;
+    __outlineCalls = [];
+    ctx = {
+      beginPath() {},
+      moveTo(x, y) { __outlineCalls.push(['M', x, y]); },
+      lineTo(x, y) { __outlineCalls.push(['L', x, y]); },
+      closePath() { __outlineCalls.push(['Z']); },
+      stroke() {},
+    };
+    drawVertebra({
+      points: {
+        anteriorSuperior: { x: 10, y: 10 },
+        posteriorSuperior: { x: 30, y: 10 },
+        posteriorInferior: { x: 30, y: 30 },
+        anteriorInferior: { x: 10, y: 30 },
+      },
+    }, 0, false, true, false, false);
+  `);
+
+  assert.deepEqual(page.snapshot('__outlineCalls'), [
+    ['M', 10, 10],
+    ['L', 30, 10],
+    ['L', 30, 30],
+    ['L', 10, 30],
+    ['Z'],
+  ]);
+});
+
 test('scanner preserves formal suffixes and excludes samp, ai, and model artifacts', () => {
   const page = loadHtmlScript(pagePath);
   const result = scan(page, [
@@ -60,6 +128,23 @@ test('scanner preserves formal suffixes and excludes samp, ai, and model artifac
   ]);
   assert.equal(result.unmatchedImages.length, 0);
   assert.equal(result.unmatchedJson.length, 0);
+});
+
+test('scanner excludes exported pair-review manifests from annotation pairing', () => {
+  const page = loadHtmlScript(pagePath);
+  const result = scan(page, [
+    fakeFile('Images/case.png'),
+    fakeFile('Images/case.json'),
+    fakeFile('Images/pair_review.json'),
+    fakeFile('Images/20260802pair_review.json'),
+  ]);
+
+  assert.equal(result.pairs.length, 1);
+  assert.equal(result.unmatchedJson.length, 0);
+  assert.deepEqual(result.excluded.map(item => item.path).sort(), [
+    'Images/20260802pair_review.json',
+    'Images/pair_review.json',
+  ]);
 });
 
 test('scanner pairs only exact full stem in the same directory', () => {
@@ -147,6 +232,7 @@ test('review store resumes exact datasets and retains only unchanged pair signat
     match: 1,
     mismatch: 1,
     pending: 0,
+    implant: 0,
   });
 
   const changedScan = scan(page, [
@@ -183,18 +269,112 @@ test('mismatch reason validation and CSV export are doctor-friendly', () => {
   assert.ok(csv.includes(',true,2026-08-02T00:00:00.000Z'));
 });
 
-test('batch mode renders raw JSON coordinates so dimension mismatch remains visible', () => {
+test('batch auto mode scales coordinates for a near-uniform resized image', () => {
   const page = loadHtmlScript(pagePath);
   page.evaluate(`
-    originalImage = { width: 1200, height: 1200 };
-    annotationData = { imageInfo: { width: 600, height: 600 } };
+    originalImage = { width: 1200, height: 2386 };
+    annotationData = { imageInfo: { width: 1279, height: 2543 } };
     batchReviewMode = true;
+    coordinateDisplayMode = 'auto';
+    updateScaleFactors();
+  `);
+  const scales = page.snapshot('({ scaleX, scaleY })');
+  assert.ok(Math.abs(scales.scaleX - (1200 / 1279)) < 1e-12);
+  assert.ok(Math.abs(scales.scaleY - (2386 / 2543)) < 1e-12);
+});
+
+test('batch auto mode keeps raw coordinates for an aspect-ratio mismatch', () => {
+  const page = loadHtmlScript(pagePath);
+  page.evaluate(`
+    originalImage = { width: 1200, height: 2200 };
+    annotationData = { imageInfo: { width: 1200, height: 2400 } };
+    batchReviewMode = true;
+    coordinateDisplayMode = 'auto';
     updateScaleFactors();
   `);
   assert.deepEqual(page.snapshot('({ scaleX, scaleY })'), { scaleX: 1, scaleY: 1 });
+});
 
-  page.evaluate('batchReviewMode = false; updateScaleFactors()');
-  assert.deepEqual(page.snapshot('({ scaleX, scaleY })'), { scaleX: 2, scaleY: 2 });
+test('loading a batch pair applies the selected coordinate display mode', async () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  const currentScan = scan(page, [
+    fakeFile('Images/a.png'),
+    fakeFile('Images/a.json'),
+  ]);
+  page.context.__scan = currentScan;
+  page.evaluate(`
+    decodeImageFile = async () => ({ width: 1200, height: 2386 });
+    readTextFile = async () => JSON.stringify({
+      version: '2.3',
+      spineType: 'L',
+      imageInfo: { width: 1279, height: 2543 },
+      vertebrae: [],
+      discs: [],
+      abnormalities: {},
+    });
+    coordinateDisplayMode = 'auto';
+    __loadController = new BatchReviewController(new ReviewStore(localStorage));
+    __loadController.scan = __scan;
+    __loadController.manifest = __loadController.store.createManifest(__scan, {}, [], __scan.pairs[0].id);
+  `);
+
+  await page.evaluate('__loadController.loadCurrentPair()');
+  const scales = page.snapshot('({ scaleX, scaleY })');
+  assert.ok(Math.abs(scales.scaleX - (1200 / 1279)) < 1e-12);
+  assert.ok(Math.abs(scales.scaleY - (2386 / 2543)) < 1e-12);
+});
+
+test('doctor can switch a uniform resize between raw and auto-scaled coordinates', () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  assert.equal(page.evaluate('typeof setCoordinateDisplayMode'), 'function');
+  page.evaluate(`
+    originalImage = { width: 1200, height: 2386 };
+    annotationData = {
+      imageInfo: { width: 1279, height: 2543 },
+      vertebrae: [],
+      discs: [],
+      abnormalities: {},
+    };
+    batchReviewMode = true;
+    setCoordinateDisplayMode('raw');
+  `);
+  assert.deepEqual(page.snapshot('({ scaleX, scaleY, coordinateDisplayMode })'), {
+    scaleX: 1,
+    scaleY: 1,
+    coordinateDisplayMode: 'raw',
+  });
+
+  page.evaluate("setCoordinateDisplayMode('auto')");
+  const scales = page.snapshot('({ scaleX, scaleY, coordinateDisplayMode })');
+  assert.equal(scales.coordinateDisplayMode, 'auto');
+  assert.ok(Math.abs(scales.scaleX - (1200 / 1279)) < 1e-12);
+  assert.ok(Math.abs(scales.scaleY - (2386 / 2543)) < 1e-12);
+});
+
+test('sidebar identifies a near-uniform resize separately from a crop mismatch', () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  page.evaluate(`
+    originalImage = { width: 1200, height: 2386 };
+    annotationData = {
+      version: '2.3',
+      spineType: 'L',
+      imageInfo: { width: 1279, height: 2543 },
+      vertebrae: [],
+      discs: [],
+      abnormalities: {},
+    };
+    batchReviewMode = true;
+    coordinateDisplayMode = 'auto';
+    updateScaleFactors();
+    renderSidebar();
+  `);
+
+  const info = page.document.getElementById('fileInfo').innerHTML;
+  assert.match(info, /等比例縮放/);
+  assert.match(info, /自動校正/);
 });
 
 test('controller records validated decisions and ignores stale async load tokens', () => {
@@ -237,7 +417,7 @@ test('batch review controls are present in the standalone HTML', () => {
   for (const id of [
     'reviewFolderInput', 'manifestInput', 'batchReviewPanel', 'batchProgress',
     'batchPairName', 'mismatchReason', 'mismatchNote', 'manualImageSelect',
-    'manualJsonSelect', 'batchIssues'
+    'manualJsonSelect', 'batchIssues', 'coordinateDisplayMode'
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
@@ -263,4 +443,51 @@ test('imported review manifest from a different root folder is rejected', () => 
     pairs: [], reviews: {}, manualPairs: [], currentPairId: null,
   };
   assert.equal(page.evaluate('batchReviewController.loadImportedManifest(__manifest)'), false);
+});
+
+test('scanner excludes exported case_flags.json from annotation pairing', () => {
+  const page = loadHtmlScript(pagePath);
+  const result = scan(page, [
+    fakeFile('Images/a.png'), fakeFile('Images/a.json'),
+    fakeFile('Images/case_flags.json'),
+  ]);
+  assert.equal(result.pairs.length, 1);
+  assert.deepEqual(result.excluded.map(item => item.path), ['Images/case_flags.json']);
+});
+
+test('implant case flags are recorded without a decision, survive resume, and export as case_flags.json', () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  const currentScan = scan(page, [
+    fakeFile('Images/a.png'), fakeFile('Images/a.json'),
+    fakeFile('Images/b.png'), fakeFile('Images/b.json'),
+  ]);
+  page.context.__scan = currentScan;
+  page.evaluate(`
+    __flagController = new BatchReviewController(new ReviewStore(localStorage));
+    __flagController.scan = __scan;
+    __flagController.manifest = __flagController.store.createManifest(__scan, {}, [], __scan.pairs[0].id);
+    batchReviewMode = true;
+  `);
+  assert.deepEqual(page.snapshot('__flagController.currentCaseFlags()'), { hasImplant: false, implantNote: '', source: null });
+  assert.equal(page.evaluate("__flagController.setCaseFlags({ hasImplant: true, implantNote: ' L4-L5 cage ' })"), true);
+  assert.equal(page.evaluate('Object.keys(__flagController.manifest.reviews).length'), 0, 'no decision written');
+  assert.deepEqual(page.snapshot('__flagController.currentCaseFlags()'), { hasImplant: true, implantNote: 'L4-L5 cage', source: 'review' });
+  assert.equal(page.evaluate('__flagController.manifest.summary.implant'), 1);
+  assert.equal(page.evaluate('__flagController.toggleImplant() && __flagController.currentCaseFlags().hasImplant'), false);
+  page.evaluate('__flagController.toggleImplant()');
+
+  // JSON 自帶的 caseFlags 會顯示為預設值（來源 annotation）
+  page.evaluate(`
+    __flagController.currentIndex = 1;
+    annotationData = { caseFlags: { hasImplant: true, implantNote: 'from json' } };
+  `);
+  assert.deepEqual(page.snapshot('__flagController.currentCaseFlags()'), { hasImplant: true, implantNote: 'from json', source: 'annotation' });
+
+  const resumed = page.snapshot('__flagController.store.resume(__scan, __flagController.manifest).manifest.caseFlags');
+  assert.equal(Object.keys(resumed).length, 1);
+  const exported = page.snapshot('__flagController.caseFlagsExport()');
+  assert.equal(exported.kind, 'case_flags');
+  assert.deepEqual(exported.entries.map(e => [e.imagePath, e.jsonPath, e.hasImplant, e.implantNote]),
+    [['Images/a.png', 'Images/a.json', true, 'L4-L5 cage']]);
 });

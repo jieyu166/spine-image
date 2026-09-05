@@ -221,6 +221,10 @@
                         <button class="btn-secondary" onclick="batchPrevious()">← 上一筆 (K)</button>
                         <button class="btn-secondary" onclick="batchNext()">下一筆 (J) →</button>
                     </div>
+                    <select class="batch-field" id="coordinateDisplayMode" aria-label="標註座標顯示方式" onchange="setCoordinateDisplayMode(this.value)">
+                        <option value="auto" selected>座標：自動校正等比例縮放</option>
+                        <option value="raw">座標：原始值（檢查裁切／尺寸）</option>
+                    </select>
                     <select class="batch-field" id="mismatchReason" aria-label="不相符原因">
                         <option value="">選擇不相符原因（必填）</option>
                         <option value="image_patient_mismatch">影像／病人錯配</option>
@@ -236,7 +240,16 @@
                         <button class="decision-mismatch" onclick="markBatchMismatch()">✗ 不相符 (X)</button>
                         <button class="btn-secondary" onclick="skipBatchPair()">略過 (S)</button>
                     </div>
+                    <div class="batch-flags" style="margin:6px 0; padding:6px; border:1px solid #444; border-radius:4px;">
+                        <label>
+                            <input type="checkbox" id="batchImplantCheck" onchange="setBatchImplant(this.checked)">
+                            🔩 有植入物 / cage (I) <span id="batchImplantSource" style="opacity:.7;"></span>
+                        </label>
+                        <input type="text" class="batch-field" id="batchImplantNote" placeholder="植入物節段，例如 L4-L5 cage" onchange="setBatchImplantNote(this.value)">
+                        <div class="help-text">不需先判相符也能標；匯出 case_flags.json 放進 Images/，regenerate_splits.py 會自動合併。</div>
+                    </div>
                     <div class="batch-actions">
+                        <button class="btn-secondary" onclick="exportCaseFlagsJson()">匯出 case_flags.json</button>
                         <button class="btn-secondary" onclick="exportPairReviewJson()">匯出 pair_review.json</button>
                         <button class="btn-secondary" onclick="exportPairReviewCsv()">匯出 pair_review.csv</button>
                         <button class="btn-secondary" onclick="pickReviewManifest()">匯入審查紀錄</button>
@@ -247,7 +260,7 @@
                     <div class="batch-actions">
                         <button class="btn-secondary" onclick="addManualPair()">建立人工配對</button>
                     </div>
-                    <div class="batch-help">快捷鍵：M 相符、X 不相符、J/→ 下一筆、K/← 上一筆、S 略過。批次模式不會自動縮放 JSON 座標，尺寸錯配會原樣顯示。</div>
+                    <div class="batch-help">快捷鍵：M 相符、X 不相符、J/→ 下一筆、K/← 上一筆、S 略過。自動模式只校正近似等比例縮放；若懷疑裁切或尺寸錯配，可切換為原始座標檢查。</div>
                 </div>
                 <div class="section">
                     <div class="section-title">📄 檔案資訊</div>
@@ -284,10 +297,11 @@
         let isDragging = false, lastMouse = {x:0, y:0};
         let highlightVertebra = -1;
         let batchReviewMode = false;
+        let coordinateDisplayMode = 'auto';
 
         class PairScanner {
             static IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'bmp', 'tif', 'tiff', 'dcm']);
-            static EXCLUDED_SUFFIX = /(?:samp|ai|model)$/i;
+            static EXCLUDED_SUFFIX = /(?:samp|ai|model|pair_review|case_flags)$/i;
 
             static relativePath(file) {
                 return String(file.webkitRelativePath || file.name || '').replaceAll('\\', '/').replace(/^\.\//, '');
@@ -450,7 +464,7 @@
                 this.storage = storage;
             }
 
-            createManifest(scan, reviews = {}, manualPairs = [], currentPairId = null) {
+            createManifest(scan, reviews = {}, manualPairs = [], currentPairId = null, caseFlags = {}) {
                 const pairById = new Map(scan.pairs.map(pair => [pair.id, pair]));
                 const normalizedReviews = {};
                 for (const [pairId, review] of Object.entries(reviews || {})) {
@@ -458,13 +472,28 @@
                     if (!pair) continue;
                     normalizedReviews[pairId] = { ...review, signature: pair.signature };
                 }
+                // 病例旗標（植入物）與相符判定分開存：不需先判定相符也能標；不綁 signature，
+                // 因為旗標描述的是影像本身，JSON 重匯出後仍成立。
+                const normalizedCaseFlags = {};
+                for (const [pairId, flags] of Object.entries(caseFlags || {})) {
+                    const pair = pairById.get(pairId);
+                    if (!pair || !flags) continue;
+                    normalizedCaseFlags[pairId] = {
+                        hasImplant: Boolean(flags.hasImplant),
+                        implantNote: String(flags.implantNote || '').trim(),
+                        imagePath: pair.imagePath,
+                        jsonPath: pair.jsonPath,
+                        updatedAt: flags.updatedAt || new Date().toISOString()
+                    };
+                }
                 const reviewValues = Object.values(normalizedReviews);
                 const summary = {
                     totalPairs: scan.pairs.length,
                     reviewed: reviewValues.length,
                     match: reviewValues.filter(review => review.status === 'match').length,
                     mismatch: reviewValues.filter(review => review.status === 'mismatch').length,
-                    pending: Math.max(0, scan.pairs.length - reviewValues.length)
+                    pending: Math.max(0, scan.pairs.length - reviewValues.length),
+                    implant: Object.values(normalizedCaseFlags).filter(flags => flags.hasImplant).length
                 };
                 return {
                     version: ReviewStore.VERSION,
@@ -481,6 +510,7 @@
                         manual: pair.manual
                     })),
                     reviews: normalizedReviews,
+                    caseFlags: normalizedCaseFlags,
                     summary,
                     issues: {
                         unmatchedImages: scan.unmatchedImages.map(item => item.path),
@@ -536,7 +566,7 @@
                 }
                 const currentPairId = currentPairs.has(oldManifest?.currentPairId) ? oldManifest.currentPairId : null;
                 return {
-                    manifest: this.createManifest(scan, reviews, oldManifest?.manualPairs || [], currentPairId),
+                    manifest: this.createManifest(scan, reviews, oldManifest?.manualPairs || [], currentPairId, oldManifest?.caseFlags || {}),
                     stalePairIds
                 };
             }
@@ -691,7 +721,8 @@
                     this.scan,
                     this.manifest.reviews,
                     this.manualPairs,
-                    pair.id
+                    pair.id,
+                    this.manifest.caseFlags
                 );
                 this.store.save(this.scan, this.manifest);
 
@@ -758,8 +789,7 @@
                     batchReviewMode = true;
                     originalImage = image;
                     annotationData = normalized;
-                    scaleX = 1;
-                    scaleY = 1;
+                    updateScaleFactors();
                     highlightVertebra = -1;
                     document.getElementById('dropZone').classList.add('hidden');
                     resetView();
@@ -789,6 +819,72 @@
                 const review = this.manifest?.reviews?.[this.currentPair()?.id] || null;
                 document.getElementById('mismatchReason').value = review?.reason || '';
                 document.getElementById('mismatchNote').value = review?.note || '';
+                const flags = this.currentCaseFlags();
+                const check = document.getElementById('batchImplantCheck');
+                const note = document.getElementById('batchImplantNote');
+                if (check) check.checked = flags.hasImplant;
+                if (note) note.value = flags.implantNote;
+                const source = document.getElementById('batchImplantSource');
+                if (source) source.textContent = flags.source === 'review' ? '（本次審查設定）' : flags.source === 'annotation' ? '（來自標註 JSON）' : '';
+            }
+
+            // 有效旗標：審查紀錄優先，其次是標註 JSON 自帶的 caseFlags，最後預設無。
+            currentCaseFlags() {
+                const pair = this.currentPair();
+                const recorded = pair ? this.manifest?.caseFlags?.[pair.id] : null;
+                if (recorded) return { hasImplant: Boolean(recorded.hasImplant), implantNote: recorded.implantNote || '', source: 'review' };
+                const fromJson = annotationData?.caseFlags;
+                if (fromJson && typeof fromJson === 'object' && fromJson.hasImplant) {
+                    return { hasImplant: true, implantNote: String(fromJson.implantNote || ''), source: 'annotation' };
+                }
+                return { hasImplant: false, implantNote: '', source: null };
+            }
+
+            setCaseFlags(update = {}) {
+                const pair = this.currentPair();
+                if (!pair || !this.manifest) return false;
+                const current = this.currentCaseFlags();
+                const next = {
+                    hasImplant: update.hasImplant !== undefined ? Boolean(update.hasImplant) : current.hasImplant,
+                    implantNote: update.implantNote !== undefined ? String(update.implantNote || '').trim() : current.implantNote,
+                    updatedAt: new Date().toISOString()
+                };
+                this.manifest.caseFlags = { ...(this.manifest.caseFlags || {}), [pair.id]: next };
+                this.manifest = this.store.createManifest(this.scan, this.manifest.reviews, this.manualPairs, pair.id, this.manifest.caseFlags);
+                this.store.save(this.scan, this.manifest);
+                this.populateDecisionFields();
+                this.render();
+                return true;
+            }
+
+            toggleImplant() {
+                return this.setCaseFlags({ hasImplant: !this.currentCaseFlags().hasImplant });
+            }
+
+            // 匯出給 regenerate_splits.py --case-flags 用的側檔（放進 Images/ 資料夾即可自動讀取）
+            caseFlagsExport() {
+                const entries = Object.values(this.manifest?.caseFlags || {})
+                    .sort((a, b) => a.imagePath.localeCompare(b.imagePath))
+                    .map(flags => ({
+                        imagePath: flags.imagePath,
+                        jsonPath: flags.jsonPath,
+                        hasImplant: Boolean(flags.hasImplant),
+                        implantNote: flags.implantNote || '',
+                        updatedAt: flags.updatedAt
+                    }));
+                return {
+                    version: '1.0',
+                    kind: 'case_flags',
+                    dataset: { key: this.scan?.datasetKey || null, rootName: this.scan?.rootName || null },
+                    exportedAt: new Date().toISOString(),
+                    entries
+                };
+            }
+
+            exportCaseFlags() {
+                if (!this.manifest) return false;
+                this.download(JSON.stringify(this.caseFlagsExport(), null, 2), 'case_flags.json', 'application/json');
+                return true;
             }
 
             addManualPair(imagePath, jsonPath) {
@@ -864,8 +960,9 @@
                 const matches = Object.values(reviews).filter(review => review.status === 'match').length;
                 const mismatches = Object.values(reviews).filter(review => review.status === 'mismatch').length;
                 const pair = this.currentPair();
+                const implants = Object.values(this.manifest?.caseFlags || {}).filter(flags => flags.hasImplant).length;
                 document.getElementById('batchProgress').textContent =
-                    `${total ? this.currentIndex + 1 : 0}/${total}｜已審 ${reviewed}｜相符 ${matches}｜不相符 ${mismatches}`;
+                    `${total ? this.currentIndex + 1 : 0}/${total}｜已審 ${reviewed}｜相符 ${matches}｜不相符 ${mismatches}｜植入物 ${implants}`;
                 document.getElementById('batchPairName').innerHTML = pair
                     ? `<strong>${BatchReviewController.escapeHtml(pair.imagePath)}</strong><br>${BatchReviewController.escapeHtml(pair.jsonPath)}${pair.manual ? '<br><em>人工配對</em>' : ''}`
                     : '沒有有效配對';
@@ -907,6 +1004,10 @@
             middleSuperior:    { color: '#20c997', label: 'MS', idx: 4 },
             middleInferior:    { color: '#20c997', label: 'MI', idx: 5 },
         };
+        const VERTEBRA_OUTLINE_ORDER = [
+            'anteriorSuperior', 'middleSuperior', 'posteriorSuperior',
+            'posteriorInferior', 'middleInferior', 'anteriorInferior'
+        ];
 
         // ==================== Init ====================
         window.onload = function() {
@@ -996,6 +1097,14 @@
 
         function batchPrevious() { batchReviewController.navigate(-1); }
         function batchNext() { batchReviewController.navigate(1); }
+        function setCoordinateDisplayMode(mode) {
+            coordinateDisplayMode = mode === 'raw' ? 'raw' : 'auto';
+            const selector = document.getElementById('coordinateDisplayMode');
+            if (selector) selector.value = coordinateDisplayMode;
+            updateScaleFactors();
+            renderSidebar();
+            redraw();
+        }
         function markBatchMatch() { batchReviewController.recordDecision('match', '', ''); }
         function markBatchMismatch() {
             batchReviewController.recordDecision(
@@ -1006,6 +1115,10 @@
         }
         function skipBatchPair() { batchReviewController.skip(); }
         function exportPairReviewJson() { batchReviewController.exportJson(); }
+        function exportCaseFlagsJson() { batchReviewController.exportCaseFlags(); }
+        function setBatchImplant(checked) { batchReviewController.setCaseFlags({ hasImplant: checked }); }
+        function setBatchImplantNote(value) { batchReviewController.setCaseFlags({ implantNote: value }); }
+        function toggleBatchImplant() { batchReviewController.toggleImplant(); }
         function exportPairReviewCsv() { batchReviewController.exportCsv(); }
         function addManualPair() {
             batchReviewController.addManualPair(
@@ -1024,6 +1137,7 @@
             else if (key === 'j' || event.key === 'ArrowRight') batchNext();
             else if (key === 'k' || event.key === 'ArrowLeft') batchPrevious();
             else if (key === 's') skipBatchPair();
+            else if (key === 'i') toggleBatchImplant();
             else return;
             event.preventDefault();
         }
@@ -1120,17 +1234,34 @@
             }
         }
 
+        function getDimensionRelationship(image, imageInfo) {
+            if (!image || !imageInfo?.width || !imageInfo?.height) {
+                return { kind: 'unknown', scaleX: 1, scaleY: 1 };
+            }
+            const nextScaleX = image.width / imageInfo.width;
+            const nextScaleY = image.height / imageInfo.height;
+            if (image.width === imageInfo.width && image.height === imageInfo.height) {
+                return { kind: 'exact', scaleX: nextScaleX, scaleY: nextScaleY };
+            }
+            const relativeDifference = Math.abs(nextScaleX - nextScaleY) /
+                Math.max(Math.abs(nextScaleX), Math.abs(nextScaleY), Number.EPSILON);
+            return {
+                kind: relativeDifference <= 0.005 ? 'uniform-resize' : 'aspect-mismatch',
+                scaleX: nextScaleX,
+                scaleY: nextScaleY
+            };
+        }
+
         function updateScaleFactors() {
             // If annotation JSON specifies imageInfo dimensions, compute scale
             // so annotation coordinates map correctly onto the loaded image
             scaleX = 1; scaleY = 1;
-            // 審查模式故意保留原始座標，避免自動縮放掩蓋裁切／尺寸錯配。
-            if (batchReviewMode) return;
             if (originalImage && annotationData && annotationData.imageInfo) {
-                const ai = annotationData.imageInfo;
-                if (ai.width && ai.height) {
-                    scaleX = originalImage.width / ai.width;
-                    scaleY = originalImage.height / ai.height;
+                const relationship = getDimensionRelationship(originalImage, annotationData.imageInfo);
+                if (!batchReviewMode ||
+                    (coordinateDisplayMode === 'auto' && relationship.kind !== 'aspect-mismatch')) {
+                    scaleX = relationship.scaleX;
+                    scaleY = relationship.scaleY;
                 }
             }
         }
@@ -1703,7 +1834,7 @@
             const pts = v.points;
             if (!pts) return;
 
-            const corners = []; // ordered for outline
+            const outlinePoints = [];
             const allPts = []; // all points including middle
 
             // Collect corners in order (apply coordinate scaling)
@@ -1715,7 +1846,7 @@
                 if (p && p.x != null && p.y != null) {
                     const sp = { x: p.x * scaleX, y: p.y * scaleY, name, config };
                     allPts.push(sp);
-                    if (config.idx < 4) corners.push(sp);
+                    outlinePoints.push(sp);
                 }
             }
 
@@ -1727,7 +1858,7 @@
                         const name = names[i];
                         const config = CORNER_CONFIG[name];
                         const sp = { x: p.x * scaleX, y: p.y * scaleY, name, config };
-                        corners.push(sp);
+                        outlinePoints.push(sp);
                         allPts.push(sp);
                     }
                 });
@@ -1739,9 +1870,10 @@
             const ptRadius = isHighlight ? 6 / zoom : 4 / zoom;
 
             // Outline
-            if (showLines && corners.length >= 2) {
-                // Sort corners by their index for proper quadrilateral drawing
-                const sorted = [...corners].sort((a, b) => a.config.idx - b.config.idx);
+            if (showLines && outlinePoints.length >= 2) {
+                const sorted = [...outlinePoints].sort((a, b) =>
+                    VERTEBRA_OUTLINE_ORDER.indexOf(a.name) - VERTEBRA_OUTLINE_ORDER.indexOf(b.name)
+                );
                 ctx.beginPath();
                 ctx.moveTo(sorted[0].x, sorted[0].y);
                 for (let i = 1; i < sorted.length; i++) ctx.lineTo(sorted[i].x, sorted[i].y);
@@ -1856,13 +1988,31 @@
             if (d.exportDate) {
                 infoHtml += `<div class="info-card"><span class="label">匯出日期:</span> <span class="value">${new Date(d.exportDate).toLocaleString()}</span></div>`;
             }
+            if (d.caseFlags && typeof d.caseFlags === 'object') {
+                const f = d.caseFlags;
+                const parts = [];
+                if (f.hasImplant) parts.push('🔩 植入物' + (f.implantNote ? `（${f.implantNote}）` : ''));
+                if (f.annotationComplete === false) parts.push('⏹ 提前結束' + (f.truncatedReason === 'obscured' ? '（遮蔽）' : ''));
+                infoHtml += `<div class="info-card"><span class="label">病例旗標:</span> <span class="value">${parts.length ? parts.join('、') : '無'}</span></div>`;
+            }
             // Check size match
             if (originalImage && d.imageInfo) {
-                const match = originalImage.width === d.imageInfo.width && originalImage.height === d.imageInfo.height;
-                infoHtml += `<div class="info-card" style="border-left:4px solid ${match ? '#27ae60' : '#dc3545'};">
+                const relationship = getDimensionRelationship(originalImage, d.imageInfo);
+                const display = relationship.kind === 'exact'
+                    ? { color: '#27ae60', text: '✅ 一致' }
+                    : relationship.kind === 'uniform-resize'
+                        ? {
+                            color: '#f39c12',
+                            text: `⚠️ 等比例縮放 (影像 ${originalImage.width}x${originalImage.height})｜${batchReviewMode && coordinateDisplayMode === 'auto' ? '已自動校正' : '目前顯示原始座標'}`
+                        }
+                        : {
+                            color: '#dc3545',
+                            text: `⚠️ 比例不一致／疑似裁切 (影像 ${originalImage.width}x${originalImage.height})｜批次模式保留原始座標`
+                        };
+                infoHtml += `<div class="info-card" style="border-left:4px solid ${display.color};">
                     <span class="label">尺寸比對:</span>
-                    <span class="value" style="color:${match ? '#27ae60' : '#dc3545'};">
-                        ${match ? '✅ 一致' : `⚠️ 不一致 (影像 ${originalImage.width}x${originalImage.height})`}
+                    <span class="value" style="color:${display.color};">
+                        ${display.text}
                     </span>
                 </div>`;
             }

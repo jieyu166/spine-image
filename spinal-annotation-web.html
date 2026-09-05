@@ -474,6 +474,24 @@
                     <div id="abnormalities"></div>
                 </div>
 
+                <!-- 病例註記（隨 JSON 匯出，供訓練分組） -->
+                <div class="section">
+                    <div class="section-title">🩻 病例註記</div>
+                    <label>
+                        <input type="checkbox" id="implantCheck" onchange="setCaseImplant(this.checked)">
+                        有植入物（鋼板 / 椎籠 / 骨釘）
+                    </label>
+                    <input type="text" id="implantNote" placeholder="植入物節段，例如 C4-C5 ACDF" style="display:none; width:100%; margin-top:4px;" onchange="setImplantNote(this.value)">
+                    <div id="truncatedBox" style="display:none; margin-top:6px;">
+                        <div class="help-text">已提前結束：下段未標（匯出 annotationComplete=false）</div>
+                        <select id="truncatedReason" onchange="setTruncatedReason(this.value)">
+                            <option value="obscured">被鎖骨 / 肩膀遮蔽</option>
+                            <option value="other">其他原因</option>
+                        </select>
+                    </div>
+                    <div class="help-text">植入物病例訓練時可分開；提前結束代表 GT 刻意截斷，不是漏標。</div>
+                </div>
+
                 <!-- 匯出 -->
                 <div class="export-panel">
                     <strong>💾 匯出數據</strong>
@@ -536,6 +554,13 @@
         let contrastEnhanced = false;
         let processedImage = null;
         let annotationFinished = false; // 提前結束標註
+        // ── 病例層級旗標（隨 JSON 匯出，供訓練分組/篩選）──
+        // finishedEarly: 醫師按「結束標註」提前結束（例如 C-spine 下段被鎖骨遮住），
+        //                匯出為 caseFlags.annotationComplete=false，代表「GT 刻意截斷」而非漏標。
+        let finishedEarly = false;
+        let truncatedReason = null;       // 'obscured' | 'other' | null
+        let caseHasImplant = false;       // 有植入物（鋼板/椎籠/骨釘等）→ 訓練時可分開
+        let caseImplantNote = '';         // 植入物節段或說明（自由文字）
         let endplatePointMode = 3; // 2 or 3 points per endplate
         let annotationDirty = false;
         let currentImageMeta = null;
@@ -793,6 +818,11 @@
             currentPoints = [];
             annotationFinished = false;
             annotationDirty = false;
+            finishedEarly = false;
+            truncatedReason = null;
+            caseHasImplant = false;
+            caseImplantNote = '';
+            syncCaseFlagsUI();
 
             isDragging = false;
             wasDragging = false;
@@ -1341,6 +1371,8 @@
             } else if (vertebrae.length > 0) {
                 vertebrae.pop();
                 annotationFinished = false; // 撤銷後可繼續標註
+                finishedEarly = false;
+                syncCaseFlagsUI();
                 markAnnotationDirty();
             }
             redraw();
@@ -1354,6 +1386,8 @@
             } else if (vertebrae.length > 0) {
                 vertebrae.pop();
                 annotationFinished = false; // 刪除椎體後可繼續標註
+                finishedEarly = false;
+                syncCaseFlagsUI();
                 markAnnotationDirty();
             }
             redraw();
@@ -1379,9 +1413,61 @@
                 currentPoints = [];
             }
             annotationFinished = true;
+            finishedEarly = true;
+            if (!truncatedReason) truncatedReason = 'obscured';
+            syncCaseFlagsUI();
             markAnnotationDirty();
             redraw();
             updateUI();
+        }
+
+        // ==================== 病例旗標 ====================
+        function setCaseImplant(checked) {
+            caseHasImplant = Boolean(checked);
+            markAnnotationDirty();
+            syncCaseFlagsUI();
+        }
+
+        function setImplantNote(text) {
+            caseImplantNote = String(text || '').trim();
+            markAnnotationDirty();
+        }
+
+        function setTruncatedReason(value) {
+            truncatedReason = value || null;
+            markAnnotationDirty();
+        }
+
+        function getCaseFlags() {
+            return {
+                hasImplant: caseHasImplant,
+                implantNote: caseHasImplant ? caseImplantNote : '',
+                annotationComplete: !finishedEarly,
+                truncatedReason: finishedEarly ? (truncatedReason || 'obscured') : null
+            };
+        }
+
+        function applyCaseFlags(flags) {
+            const f = flags && typeof flags === 'object' ? flags : {};
+            caseHasImplant = Boolean(f.hasImplant);
+            caseImplantNote = String(f.implantNote || '');
+            finishedEarly = f.annotationComplete === false;
+            truncatedReason = finishedEarly ? (f.truncatedReason || 'obscured') : null;
+            syncCaseFlagsUI();
+        }
+
+        function syncCaseFlagsUI() {
+            const chk = document.getElementById('implantCheck');
+            if (chk) chk.checked = caseHasImplant;
+            const note = document.getElementById('implantNote');
+            if (note) {
+                note.value = caseImplantNote;
+                note.style.display = caseHasImplant ? '' : 'none';
+            }
+            const trunc = document.getElementById('truncatedBox');
+            if (trunc) trunc.style.display = finishedEarly ? '' : 'none';
+            const sel = document.getElementById('truncatedReason');
+            if (sel) sel.value = truncatedReason || 'obscured';
         }
 
         // ==================== 匯入 JSON ====================
@@ -1596,6 +1682,7 @@
             // 標記為已完成 (匯入的標註可直接編輯)
             annotationFinished = true;
             endplatePointMode = 3; // 匯入後以 3 點模式顯示
+            applyCaseFlags(data && data.caseFlags); // 舊 JSON 沒有 caseFlags → 全部預設值
             markAnnotationDirty();
 
             redraw();
@@ -2477,6 +2564,7 @@
                 exportDate: new Date().toISOString(),
                 spineType: spineType,
                 endplatePointMode: endplatePointMode,
+                caseFlags: getCaseFlags(),
                 imageInfo: originalImage ? {
                     filename: currentImageMeta?.filename || null,
                     width: currentImageMeta?.width || originalImage.naturalWidth || originalImage.width,

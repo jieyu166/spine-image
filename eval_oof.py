@@ -190,6 +190,7 @@ def run_oof(config, inference_factory=VertebraInference):
                 "ground_truth": {
                     "vertebrae": annotation.get("vertebrae", []),
                 },
+                "case_flags": _case_flags(annotation),
             }
             try:
                 result = analyzer.predict(
@@ -260,6 +261,7 @@ def run_production_reference(
             "image_path": oof_case["image_path"],
             "spine_type": oof_case["spine_type"],
             "ground_truth": oof_case["ground_truth"],
+            "case_flags": oof_case.get("case_flags", {}),
         }
         try:
             result = analyzer.predict(
@@ -320,17 +322,31 @@ def _atomic_write_json(path, payload):
     )
 
 
+def _case_flags(annotation):
+    """標註工具匯出的病例旗標（舊 JSON 無 caseFlags → 預設完整、無植入物）。"""
+    flags = annotation.get("caseFlags")
+    flags = flags if isinstance(flags, dict) else {}
+    return {
+        "has_implant": bool(flags.get("hasImplant", False)),
+        "annotation_complete": flags.get("annotationComplete", True) is not False,
+        "truncated_reason": flags.get("truncatedReason"),
+    }
+
+
 def _case_csv_row(case):
     metrics = case.get("metrics", {})
     groups = metrics.get("groups", {})
     all_points = groups.get("all", {})
     corners = groups.get("corners", {})
     middle = groups.get("middle", {})
+    flags = case.get("case_flags") or {}
     return {
         "annotation_index": case.get("annotation_index"),
         "fold": case.get("fold"),
         "case_id": case.get("case_id"),
         "image_path": case.get("image_path"),
+        "has_implant": flags.get("has_implant"),
+        "annotation_complete": flags.get("annotation_complete"),
         "status": case.get("status"),
         "error": case.get("error"),
         "n_gt_vertebrae": metrics.get("n_gt_vertebrae"),

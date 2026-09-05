@@ -96,10 +96,12 @@ try {
     unmatchedImages: batchReviewController.scan.unmatchedImages.length,
     unmatchedJson: batchReviewController.scan.unmatchedJson.length,
     conflicts: batchReviewController.scan.conflicts.length,
-    errors: batchReviewController.scan.errors.length
+    errors: batchReviewController.scan.errors.length,
+    excludedPaths: batchReviewController.scan.excluded.map(item => item.path)
   })`), 30000);
   assert.equal(scan.pairs, 74);
-  assert.equal(scan.excluded, 15);
+  assert.equal(scan.excluded, 16);
+  assert.ok(scan.excludedPaths.includes('Images/20260802pair_review.json'));
   assert.equal(scan.unmatchedImages, 0);
   assert.equal(scan.unmatchedJson, 0);
   assert.equal(scan.conflicts, 0);

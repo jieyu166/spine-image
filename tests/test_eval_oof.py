@@ -436,3 +436,17 @@ def test_cli_builds_paths_and_supports_all_evaluation_overrides(tmp_path):
     assert config.tta is False
     assert config.worst_count == 4
     assert config.skip_production_reference is True
+
+
+def test_case_csv_row_includes_case_flags_from_annotation():
+    import eval_oof
+
+    flags = eval_oof._case_flags({"caseFlags": {"hasImplant": True, "annotationComplete": False,
+                                                "truncatedReason": "obscured"}})
+    assert flags == {"has_implant": True, "annotation_complete": False, "truncated_reason": "obscured"}
+    assert eval_oof._case_flags({})["annotation_complete"] is True
+
+    row = eval_oof._case_csv_row({"case_id": "x", "case_flags": flags})
+    assert row["has_implant"] is True
+    assert row["annotation_complete"] is False
+    assert "has_implant" in list(eval_oof._case_csv_row({}).keys())

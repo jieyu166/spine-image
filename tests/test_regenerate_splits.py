@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,18 @@ def test_scan_samples_ignores_ai_and_model_comparison_json(monkeypatch, tmp_path
     pairs, summary = splits.scan_samples()
 
     assert pairs == [("Images/case.png", images_dir / "case.json")]
+    assert summary["missing_image"] == 0
+
+
+def test_scan_samples_ignores_exported_pair_review_manifest(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    (images_dir / "20260802pair_review.json").write_text(
+        json.dumps({"version": "1.0", "reviews": {}}), encoding="utf-8"
+    )
+
+    pairs, summary = splits.scan_samples()
+
+    assert pairs == []
     assert summary["missing_image"] == 0
 
 
@@ -152,6 +165,83 @@ def test_deduplicate_pairs_keeps_each_resolved_image_once(monkeypatch, tmp_path)
 
     assert unique == [("Images/case.png", first_json)]
     assert duplicate_count == 1
+
+
+def allowlist_entry(root: Path, image_path: str, annotation_path: Path):
+    image = root / image_path
+    return {
+        "stem": annotation_path.stem,
+        "image": {
+            "path": image_path,
+            "size": image.stat().st_size,
+            "mtime_ms": int(image.stat().st_mtime * 1000),
+            "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+        },
+        "annotation": {
+            "path": annotation_path.relative_to(root).as_posix(),
+            "size": annotation_path.stat().st_size,
+            "mtime_ms": int(annotation_path.stat().st_mtime * 1000),
+            "sha256": hashlib.sha256(annotation_path.read_bytes()).hexdigest(),
+        },
+    }
+
+
+def write_allowlist(path: Path, entries):
+    path.write_text(
+        json.dumps({"version": "1.0", "entries": entries}), encoding="utf-8"
+    )
+
+
+def test_filter_pairs_by_allowlist_selects_exact_hash_locked_pairs(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    selected_json = images_dir / "selected.json"
+    excluded_json = images_dir / "excluded.json"
+    write_annotation(selected_json)
+    write_annotation(excluded_json)
+    (images_dir / "selected.png").write_bytes(b"selected-image")
+    (images_dir / "excluded.png").write_bytes(b"excluded-image")
+    pairs = splits.find_paired_samples()
+    allowlist_path = tmp_path / "allowlist.json"
+    write_allowlist(
+        allowlist_path,
+        [allowlist_entry(tmp_path, "Images/selected.png", selected_json)],
+    )
+
+    filtered = splits.filter_pairs_by_allowlist(pairs, allowlist_path)
+
+    assert filtered == [("Images/selected.png", selected_json)]
+
+
+def test_filter_pairs_by_allowlist_rejects_stale_hash(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    annotation = images_dir / "case.json"
+    write_annotation(annotation)
+    image = images_dir / "case.png"
+    image.write_bytes(b"original")
+    entry = allowlist_entry(tmp_path, "Images/case.png", annotation)
+    image.write_bytes(b"changed")
+    allowlist_path = tmp_path / "allowlist.json"
+    write_allowlist(allowlist_path, [entry])
+
+    with pytest.raises(ValueError, match="stale allowlist hash.*Images/case.png"):
+        splits.filter_pairs_by_allowlist(
+            [("Images/case.png", annotation)], allowlist_path
+        )
+
+
+def test_filter_pairs_by_allowlist_rejects_pair_missing_from_scan(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    annotation = images_dir / "case.json"
+    write_annotation(annotation)
+    (images_dir / "case.png").write_bytes(b"image")
+    allowlist_path = tmp_path / "allowlist.json"
+    write_allowlist(
+        allowlist_path,
+        [allowlist_entry(tmp_path, "Images/case.png", annotation)],
+    )
+
+    with pytest.raises(ValueError, match="allowlist pair missing from scan"):
+        splits.filter_pairs_by_allowlist([], allowlist_path)
 
 
 def test_split_entries_is_reproducible_for_fixed_seed():
@@ -303,3 +393,113 @@ def test_main_dry_run_does_not_write_or_backup_split_files(
     assert val_file.read_text(encoding="utf-8") == "val-sentinel"
     assert not train_file.with_suffix(".json.bak").exists()
     assert not val_file.with_suffix(".json.bak").exists()
+
+
+def test_main_allowlist_dry_run_validates_selection_without_writing(
+    monkeypatch, tmp_path, capsys
+):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    entries = []
+    for stem in ("80145593", "80294005"):
+        annotation = images_dir / f"{stem}.json"
+        write_annotation(annotation)
+        (images_dir / f"{stem}.png").write_bytes(stem.encode("ascii"))
+        entries.append(
+            allowlist_entry(tmp_path, f"Images/{stem}.png", annotation)
+        )
+    allowlist_path = tmp_path / "allowlist.json"
+    write_allowlist(allowlist_path, entries)
+
+    annotation_dir = tmp_path / "annotations"
+    annotation_dir.mkdir()
+    train_file = annotation_dir / "train_annotations.json"
+    val_file = annotation_dir / "val_annotations.json"
+    train_file.write_text("train-sentinel", encoding="utf-8")
+    val_file.write_text("val-sentinel", encoding="utf-8")
+    monkeypatch.setattr(splits, "ANN_DIR", annotation_dir)
+    monkeypatch.setattr(splits, "TRAIN_FILE", train_file)
+    monkeypatch.setattr(splits, "VAL_FILE", val_file)
+    monkeypatch.setattr(
+        splits.sys,
+        "argv",
+        [
+            "regenerate_splits.py",
+            "--allowlist", str(allowlist_path),
+            "--group-regex", r"(\d{8})",
+            "--dry-run",
+        ],
+    )
+
+    result = splits.main()
+
+    assert result == 0
+    assert "Allowlist selected 2 validated pairs" in capsys.readouterr().out
+    assert train_file.read_text(encoding="utf-8") == "train-sentinel"
+    assert val_file.read_text(encoding="utf-8") == "val-sentinel"
+    assert not train_file.with_suffix(".json.bak").exists()
+    assert not val_file.with_suffix(".json.bak").exists()
+
+
+def test_case_flags_default_for_legacy_json_without_case_flags():
+    assert splits.case_flags({"vertebrae": []}) == {
+        "has_implant": False, "annotation_complete": True, "truncated_reason": None,
+    }
+
+
+def test_filter_entries_by_flags_counts_and_optionally_excludes_implants():
+    entries = [
+        {"image_path": "a.png", "caseFlags": {"hasImplant": True, "annotationComplete": True}},
+        {"image_path": "b.png", "caseFlags": {"hasImplant": False, "annotationComplete": False,
+                                               "truncatedReason": "obscured"}},
+        {"image_path": "c.png"},
+    ]
+    kept, summary = splits.filter_entries_by_flags(entries)
+    assert [e["image_path"] for e in kept] == ["a.png", "b.png", "c.png"]
+    assert summary == {"implant": 1, "incomplete": 1, "excluded_implant": 0}
+
+    kept, summary = splits.filter_entries_by_flags(entries, exclude_implant=True)
+    assert [e["image_path"] for e in kept] == ["b.png", "c.png"]
+    assert summary["excluded_implant"] == 1
+
+
+def test_scan_samples_ignores_exported_case_flags_manifest(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    write_annotation(images_dir / "case.json")
+    (images_dir / "case.png").write_bytes(b"image")
+    (images_dir / "case_flags.json").write_text('{"kind": "case_flags", "entries": []}', encoding="utf-8")
+
+    pairs, summary = splits.scan_samples()
+
+    assert [p[1].name for p in pairs] == ["case.json"]
+    assert summary["missing_image"] == 0
+
+
+def test_case_flags_manifest_merges_into_entries_and_overrides_json(tmp_path):
+    manifest_path = tmp_path / "case_flags.json"
+    manifest_path.write_text(json.dumps({
+        "version": "1.0", "kind": "case_flags",
+        "entries": [
+            {"imagePath": "Images/202607/a.png", "jsonPath": "Images/202607/a.json", "hasImplant": True, "implantNote": "L4-L5 cage"},
+            {"imagePath": "Images/missing.png", "jsonPath": "Images/missing.json", "hasImplant": True},
+        ],
+    }), encoding="utf-8")
+    manifest = splits.load_case_flags_manifest(manifest_path)
+    entries = [
+        {"image_path": "Images" + "\\" + "202607" + "\\" + "a.png", "caseFlags": {"hasImplant": False, "annotationComplete": False, "truncatedReason": "obscured"}},
+        {"image_path": "Images/b.png"},
+    ]
+    summary = splits.apply_case_flags_manifest(entries, manifest)
+    assert summary == {"applied": 1, "unmatched": ["Images/missing.png"]}
+    assert entries[0]["caseFlags"] == {
+        "hasImplant": True, "implantNote": "L4-L5 cage", "annotationComplete": False,
+        "truncatedReason": "obscured", "flagSource": "case_flags.json",
+    }
+    assert "caseFlags" not in entries[1]
+    assert splits.case_flags(entries[0])["has_implant"] is True
+
+
+def test_case_flags_manifest_rejects_wrong_kind(tmp_path):
+    bad = tmp_path / "x.json"
+    bad.write_text('{"version": "1.0", "reviews": {}}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        splits.load_case_flags_manifest(bad)
