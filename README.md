@@ -225,7 +225,17 @@ python train_vertebra_model.py --epochs 30 --unfreeze-epoch 5
 
 # 3b. 訓練（5-fold ensemble，~100 分鐘；先停睡眠 powercfg /change standby-timeout-ac 0）
 #     預設依 8 位病歷號或 C/L+5 位 dataset ID 做 group-aware folds。
+#     2026-10 起預設 --fold-strategy stratified（scikit-learn StratifiedGroupKFold，
+#     病人不跨 fold，並依「脊椎類型＋植入物」分層）；--fold-strategy greedy 可重現舊 run。
+#     切分方式與每折成員會寫進 cv_results.json，eval_oof.py 會自動讀取並核對。
 python train_vertebra_model_cv.py --n-folds 5 --epochs 30 --unfreeze-epoch 5
+
+# 3c. OOF 評估：每例只用沒看過它的 fold 權重推論；報告附 95% 信賴區間
+#     （以病人群為單位的 bootstrap，--bootstrap 0 可關閉）
+python eval_oof.py --run-dir endplate_training_data/runs/<run>
+
+# 3d. 兩輪 OOF 配對比較：同一批案例的差值與 95% CI，區間不含 0 才算真的有變化
+python compare_oof_runs.py --baseline endplate_training_data/runs/<舊>/oof_eval/oof_predictions.json --candidate endplate_training_data/runs/<新>/oof_eval/oof_predictions.json --output endplate_training_data/runs/<新>/oof_eval/compare.md
 
 # 4. 推論
 python inference_vertebra.py --model best_vertebra_model.pth --input spine.png --spine-type L

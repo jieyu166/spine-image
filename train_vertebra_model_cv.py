@@ -132,6 +132,68 @@ def manual_group_kfold(annotations, n_splits, seed=42,
         yield train_indices, sorted(val_indices)
 
 
+FOLD_STRATEGIES = ('stratified', 'greedy')
+
+
+def stratum_label(annotation):
+    """分層標籤：脊椎類型（L/C）＋是否植入物。讓每個 fold 的頸椎與植入物比例接近。"""
+    spine = annotation.get('spine_type') or annotation.get('spineType') or 'L'
+    flags = annotation.get('caseFlags')
+    implant = isinstance(flags, dict) and bool(flags.get('hasImplant'))
+    return f"{spine}_implant" if implant else str(spine)
+
+
+def stratified_group_kfold(annotations, n_splits, seed=42,
+                           group_regex=DEFAULT_GROUP_REGEX):
+    """scikit-learn StratifiedGroupKFold：病人不跨 fold，且依 stratum_label 分層。
+
+    與 manual_group_kfold 相比，greedy 只平衡 fold 大小；這裡同時平衡頸椎／植入物
+    在各 fold 的比例，降低「某 fold 剛好全是難例」造成的 OOF 雜訊。
+    """
+    import warnings
+    from sklearn.model_selection import StratifiedGroupKFold
+
+    if n_splits < 2:
+        raise ValueError("n_splits must be at least 2")
+    groups = [extract_group_id(annotation, group_regex) for annotation in annotations]
+    if len(set(groups)) < n_splits:
+        raise ValueError(
+            f"need at least {n_splits} patient groups, found {len(set(groups))}"
+        )
+    labels = [stratum_label(annotation) for annotation in annotations]
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    placeholder = np.zeros((len(annotations), 1))
+    with warnings.catch_warnings():
+        # 稀少分層（例如頸椎植入物只有 2 例）會觸發「least populated class」警告；
+        # 分層仍盡力平衡，病人隔離不受影響。
+        warnings.filterwarnings('ignore', message='The least populated class')
+        splits = list(splitter.split(placeholder, labels, groups))
+    for train_indices, val_indices in splits:
+        yield sorted(int(i) for i in train_indices), sorted(int(i) for i in val_indices)
+
+
+def build_group_folds(annotations, n_splits, seed=42,
+                      group_regex=DEFAULT_GROUP_REGEX, strategy='stratified'):
+    """依策略回傳 [(train_indices, val_indices), ...]，訓練與 OOF 評估共用。"""
+    if strategy == 'stratified':
+        return list(stratified_group_kfold(annotations, n_splits, seed, group_regex))
+    if strategy == 'greedy':
+        return list(manual_group_kfold(annotations, n_splits, seed, group_regex))
+    raise ValueError(f"unknown fold strategy: {strategy!r}; choose from {FOLD_STRATEGIES}")
+
+
+def fold_composition(annotations, folds):
+    """每個 validation fold 的分層組成，例如 [{'L': 14, 'C': 3, 'L_implant': 2}, ...]。"""
+    composition = []
+    for _, val_indices in folds:
+        counts = {}
+        for index in val_indices:
+            label = stratum_label(annotations[index])
+            counts[label] = counts.get(label, 0) + 1
+        composition.append(dict(sorted(counts.items())))
+    return composition
+
+
 def load_all_annotations(train_path, val_path):
     """合併 train + val annotations 成單一 list"""
     with open(train_path, 'r', encoding='utf-8') as f:
@@ -293,6 +355,13 @@ def parse_args():
         help='病人/subject ID regex；第一個 capture group 為 group ID',
     )
     parser.add_argument(
+        '--fold-strategy',
+        choices=FOLD_STRATEGIES,
+        default='stratified',
+        help='stratified = sklearn StratifiedGroupKFold（脊椎類型＋植入物分層，預設）；'
+             'greedy = 舊版手寫切分（重現 2026-09-22 以前的 run 用）',
+    )
+    parser.add_argument(
         '--sample-level-folds',
         action='store_true',
         help='重現舊實驗用；停用病人隔離並逐影像切 fold',
@@ -340,18 +409,24 @@ def main():
         fold_results = []
     if args.sample_level_folds:
         print("WARNING: sample-level folds enabled; patient leakage is possible")
-        fold_iterator = manual_kfold(
+        folds = list(manual_kfold(
             len(all_anns), args.n_folds, seed=args.seed
-        )
+        ))
     else:
-        fold_iterator = manual_group_kfold(
+        folds = build_group_folds(
             all_anns,
             args.n_folds,
             seed=args.seed,
             group_regex=args.group_regex,
+            strategy=args.fold_strategy,
         )
+    args._folds = folds
+    args._all_anns = all_anns
+    print(f"Fold strategy: {'sample-level' if args.sample_level_folds else args.fold_strategy}")
+    for fold_number, counts in enumerate(fold_composition(all_anns, folds), start=1):
+        print(f"  Fold {fold_number} val composition: {counts}")
 
-    for fold_idx, (train_idx, val_idx) in enumerate(fold_iterator):
+    for fold_idx, (train_idx, val_idx) in enumerate(folds):
         if fold_idx < len(fold_results):
             print(f"Skipping completed Fold {fold_idx + 1}/{args.n_folds}")
             continue
@@ -388,6 +463,18 @@ def _dump_summary(output_path, fold_results, config, args):
         'seed': args.seed,
         'fold_grouping': (
             'sample-level' if args.sample_level_folds else args.group_regex
+        ),
+        'fold_strategy': (
+            'sample-level' if args.sample_level_folds else args.fold_strategy
+        ),
+        # 每個 fold 的 validation 成員；eval_oof.py 會核對重建的 fold 是否完全一致。
+        'fold_val_members': [
+            [str(args._all_anns[i].get('image_path', '')).replace('\\', '/') for i in val_idx]
+            for _, val_idx in getattr(args, '_folds', [])
+        ],
+        'fold_val_composition': (
+            fold_composition(args._all_anns, args._folds)
+            if getattr(args, '_folds', None) else []
         ),
         'fold_best_val_losses': best_losses,
         'mean_best_val_loss': float(np.mean(best_losses)) if best_losses else None,

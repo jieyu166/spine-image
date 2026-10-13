@@ -370,3 +370,18 @@ test('importing JSON restores case flags and reset clears them', () => {
     hasImplant: false, implantNote: '', annotationComplete: true, truncatedReason: null,
   });
 });
+
+test('a fully annotated spine exports annotationComplete=true even if finish-early was pressed', () => {
+  const page = loadHtmlScript(pagePath);
+  loadCase(page);
+  const full = ['T12', 'L1', 'L2', 'L3', 'L4', 'L5', 'S1'].map((name, i) => {
+    const y = 100 + i * 100;
+    if (name === 'T12') return { name, boundaryType: 'lower', points: { anteriorInferior: { x: 1, y }, middleInferior: { x: 2, y }, posteriorInferior: { x: 3, y } } };
+    if (name === 'S1') return { name, boundaryType: 'upper', points: { anteriorSuperior: { x: 1, y }, middleSuperior: { x: 2, y }, posteriorSuperior: { x: 3, y } } };
+    return { name, points: { anteriorSuperior: { x: 1, y }, posteriorSuperior: { x: 3, y }, posteriorInferior: { x: 3, y: y + 50 }, anteriorInferior: { x: 1, y: y + 50 } } };
+  });
+  page.context.__annotation = matchingAnnotation({ vertebrae: full, caseFlags: { annotationComplete: false, truncatedReason: 'obscured' } });
+  page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
+  assert.equal(page.evaluate('finishedEarly'), true, 'flag restored from JSON');
+  assert.deepEqual(page.snapshot('getCaseFlags()'), { hasImplant: false, implantNote: '', annotationComplete: true, truncatedReason: null });
+});

@@ -16,6 +16,7 @@ import torch
 from compare_annotations import compare_vertebrae, draw_overlay
 from inference_vertebra import VertebraInference
 from oof_metrics import (
+    bootstrap_ci,
     compare_case_landmarks,
     rank_worst_cases,
     summarize_cases,
@@ -23,8 +24,8 @@ from oof_metrics import (
 )
 from train_vertebra_model_cv import (
     DEFAULT_GROUP_REGEX,
+    build_group_folds,
     load_all_annotations,
-    manual_group_kfold,
 )
 
 
@@ -44,6 +45,8 @@ class EvalConfig:
     tta: bool = True
     worst_count: int = 10
     skip_production_reference: bool = False
+    fold_strategy: str | None = None  # None = 讀 run_dir/cv_results.json；沒有記錄就是舊版 greedy
+    bootstrap: int = 2000  # 信賴區間的 bootstrap 次數；0 = 不算
 
     def __post_init__(self):
         for name in (
@@ -133,6 +136,28 @@ def validate_config(config):
         )
 
 
+def resolve_fold_strategy(config):
+    """回傳 (strategy, recorded_val_members)。
+
+    優先順序：CLI 指定 > run_dir/cv_results.json 的 fold_strategy > 'greedy'
+    （2026-10 以前的 run 沒有記錄，當時一律是手寫 greedy 切分）。
+    """
+    recorded = {}
+    results_path = Path(config.run_dir) / "cv_results.json"
+    if results_path.exists():
+        try:
+            recorded = json.loads(results_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = {}
+    strategy = config.fold_strategy or recorded.get("fold_strategy") or "greedy"
+    if strategy == "sample-level":
+        raise ValueError("sample-level folds cannot be evaluated as patient-grouped OOF")
+    members = recorded.get("fold_val_members") or None
+    if config.fold_strategy and recorded.get("fold_strategy") and config.fold_strategy != recorded["fold_strategy"]:
+        members = None  # 明確覆寫時不核對
+    return strategy, members
+
+
 def run_oof(config, inference_factory=VertebraInference):
     """Run each annotation through only its patient-group held-out fold."""
     validate_config(config)
@@ -140,14 +165,24 @@ def run_oof(config, inference_factory=VertebraInference):
         str(config.train_annotations),
         str(config.val_annotations),
     )
-    folds = list(
-        manual_group_kfold(
-            annotations,
-            config.n_folds,
-            seed=config.seed,
-            group_regex=config.group_regex,
-        )
+    strategy, recorded_members = resolve_fold_strategy(config)
+    folds = build_group_folds(
+        annotations,
+        config.n_folds,
+        seed=config.seed,
+        group_regex=config.group_regex,
+        strategy=strategy,
     )
+    if recorded_members:
+        rebuilt = [
+            [str(annotations[i].get("image_path", "")).replace("\\", "/") for i in val]
+            for _, val in folds
+        ]
+        if rebuilt != recorded_members:
+            raise ValueError(
+                "rebuilt OOF folds differ from the folds recorded in cv_results.json; "
+                "check --fold-strategy / --seed / annotations"
+            )
     assignments = validate_fold_assignments(
         annotations,
         folds,
@@ -448,7 +483,38 @@ def _comparison_markdown(oof_summary, production_summary):
             "",
         ]
     )
+    lines.extend(format_ci_markdown(oof_summary.get("confidence_intervals")))
     return "\n".join(lines)
+
+
+def format_ci_markdown(ci):
+    """OOF 指標的 95% 信賴區間（病人群集 bootstrap）。沒有 CI 時回傳空清單。"""
+    if not ci:
+        return []
+    labels = [
+        ("count_exact_match_rate", "Count exact", True),
+        ("corner_mean_px", "Corner mean px", False),
+        ("corner_median_px", "Corner median px", False),
+        ("corner_p90_px", "Corner P90 px", False),
+        ("middle_mean_px", "Middle mean px", False),
+    ]
+    out = [
+        f"## 95% confidence intervals ({ci['method']}, {ci['n_boot']} resamples, "
+        f"{ci['n_groups']} patient groups)",
+        "",
+        "| Metric | Estimate | 95% CI |",
+        "|---|---:|---|",
+    ]
+    for key, label, is_rate in labels:
+        item = ci["metrics"].get(key)
+        if not item or item["estimate"] is None:
+            continue
+        fmt = (lambda v: f"{v * 100:.1f}%") if is_rate else (lambda v: f"{v:.1f}")
+        low, high = item["ci_low"], item["ci_high"]
+        interval = "—" if low is None else f"{fmt(low)} – {fmt(high)}"
+        out.append(f"| {label} | {fmt(item['estimate'])} | {interval} |")
+    out.append("")
+    return out
 
 
 def write_reports(config, oof_cases, production_cases=None):
@@ -478,6 +544,13 @@ def write_reports(config, oof_cases, production_cases=None):
         },
     )
     _write_case_csv(paths["oof_case_metrics"], oof_cases)
+    if config.bootstrap:
+        oof_summary["confidence_intervals"] = bootstrap_ci(
+            oof_cases,
+            group_regex=config.group_regex,
+            n_boot=config.bootstrap,
+            seed=config.seed,
+        )
     _atomic_write_json(paths["oof_metrics"], oof_summary)
     _atomic_write_text(
         paths["comparison"],
@@ -586,6 +659,18 @@ def build_parser():
     parser.add_argument("--threshold", type=float, default=0.2)
     parser.add_argument("--no-tta", action="store_true")
     parser.add_argument("--worst-count", type=int, default=10)
+    parser.add_argument(
+        "--fold-strategy",
+        choices=("stratified", "greedy"),
+        default=None,
+        help="預設讀 run_dir/cv_results.json；舊 run 沒記錄時為 greedy",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=2000,
+        help="信賴區間 bootstrap 次數（病人群集重抽）；0 = 不計算",
+    )
     parser.add_argument("--output-dir", default="oof_eval")
     parser.add_argument(
         "--production-model",
@@ -633,6 +718,8 @@ def config_from_args(args):
         tta=not args.no_tta,
         worst_count=args.worst_count,
         skip_production_reference=args.skip_production_reference,
+        fold_strategy=args.fold_strategy,
+        bootstrap=args.bootstrap,
     )
 
 

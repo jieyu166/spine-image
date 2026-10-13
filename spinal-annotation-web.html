@@ -1438,12 +1438,22 @@
             markAnnotationDirty();
         }
 
+        // 該 spineType 的全部椎體都已標完 → 不論有沒有按過「結束標註」，都視為完整。
+        // （09-22 有 7 份 36 點完整標註仍帶 annotationComplete=false，就是旗標黏住了。）
+        function allExpectedVertebraeAnnotated() {
+            const expected = (CONFIG[spineType] && CONFIG[spineType].vertebrae) || [];
+            if (!expected.length) return false;
+            const names = new Set(vertebrae.map(v => v.name));
+            return expected.every(name => names.has(name));
+        }
+
         function getCaseFlags() {
+            const truncated = finishedEarly && !allExpectedVertebraeAnnotated();
             return {
                 hasImplant: caseHasImplant,
                 implantNote: caseHasImplant ? caseImplantNote : '',
-                annotationComplete: !finishedEarly,
-                truncatedReason: finishedEarly ? (truncatedReason || 'obscured') : null
+                annotationComplete: !truncated,
+                truncatedReason: truncated ? (truncatedReason || 'obscured') : null
             };
         }
 
