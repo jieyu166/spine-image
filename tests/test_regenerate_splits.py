@@ -503,3 +503,17 @@ def test_case_flags_manifest_rejects_wrong_kind(tmp_path):
     bad.write_text('{"version": "1.0", "reviews": {}}', encoding="utf-8")
     with pytest.raises(ValueError):
         splits.load_case_flags_manifest(bad)
+
+
+def test_scan_samples_ignores_json_backups_written_by_save_to_original(monkeypatch, tmp_path):
+    images_dir = configure_scan(monkeypatch, tmp_path)
+    write_annotation(images_dir / "202609" / "case.json")
+    (images_dir / "202609" / "case.png").write_bytes(b"image")
+    backups = images_dir / "_json_backups"
+    backups.mkdir()
+    (backups / "202609__case.json.20261029-110025.bak").write_text("{}", encoding="utf-8")
+
+    pairs, summary = splits.scan_samples()
+
+    assert [p[1].name for p in pairs] == ["case.json"]
+    assert summary["missing_image"] == 0

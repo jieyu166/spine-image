@@ -70,3 +70,6 @@ cv_train_log.txt
 
 # Other files folder (keep structure but not contents)
 # Other files/
+
+# 院內標註批次（含病人影像）
+annotation_batch_*/

@@ -210,6 +210,21 @@ pip install albumentations==1.3.1   # 1.4+ 在 Python 3.14 有安裝問題
 ```bash
 # 1. 標註：打開 spinal-annotation-web.html，標每節椎體 4 角點 + 上下 middle point，匯出 JSON
 #    L-spine 由下到上 (S1→L5→...)；C-spine 由上到下 (C2→C3→...)
+#    存回原檔：首次按「📂 授權 Images 資料夾」（Chrome/Edge，只需一次），之後「💾 存回原檔」或 Ctrl+S
+#    直接覆蓋原本讀取的 JSON，舊版自動備份到 Images/_json_backups/*.bak（訓練與 viewer 都不會讀到）。
+#    覆蓋會改變檔案 SHA-256，之後需重建 training allowlist。
+# 1b. 檢查並修正：annotation-viewer.html 看到標錯的案例，按「✏️ 送到標註工具修正」（批次模式按 E），
+#    會在同一個標註工具分頁開啟該影像與 JSON；修正後存回原檔或匯出，viewer 立即重畫修正版。
+#    自動化測試：node --test tests/viewer_editor_bridge.test.js tests/save_to_original.test.js
+#    真實 Chrome：node tests/chrome_viewer_editor_bridge_smoke.mjs <chrome.exe> <png> <json> <暫存資料夾>
+# 1c. MedSAM 框選輔助（2026-11 實驗功能）：先啟動本機服務，再在標註工具按「🧠 MedSAM 框選 (M)」，
+#    在椎體上拉框就產生該節 6 點（S1／T12 等邊界椎體只產生該終板 3 點）；先點選某一節再拉框＝修正該節；
+#    「🧠 修整全部」用現有點位外接框重算所有完整椎體。點位一定要再看過、必要時拖曳修正。
+#    匯出 JSON 會記錄每節 assist {method, iou, edited} 與 annotationReview.assistedBy。
+#    外部測試集（manifests/holdout_*.json）的影像服務會拒絕，避免測試集標準答案偏向模型。
+#    MedSAM 權重：Hugging Face wanglab/medsam-vit-base（Apache-2.0），預設放 C:\Users\jai16\.cache\medsam-vit-base，
+#    可用環境變數 MEDSAM_DIR 改位置；微調後的 decoder 由 medsam_refine.py --train-final 產生。
+python medsam_server.py   # http://127.0.0.1:8003
 
 # 2. 重生 train/val split（從 Images/ 掃描配對）
 python regenerate_splits.py --group-regex '(?:^|/)(\d{8}|[CL]\d{5})[^/]*$'
@@ -236,6 +251,12 @@ python eval_oof.py --run-dir endplate_training_data/runs/<run>
 
 # 3d. 兩輪 OOF 配對比較：同一批案例的差值與 95% CI，區間不含 0 才算真的有變化
 python compare_oof_runs.py --baseline endplate_training_data/runs/<舊>/oof_eval/oof_predictions.json --candidate endplate_training_data/runs/<新>/oof_eval/oof_predictions.json --output endplate_training_data/runs/<新>/oof_eval/compare.md
+
+# 3e. 第二階段細修實驗（不改節數與命名，只改點位；沿用第一階段 run 的 fold）
+#     refine_stage2.py：高解析度 heatmap 細修器（2026-10-15）
+#     medsam_refine.py：MedSAM 分割輪廓 → 6 點（2026-11-24；6 點連成六邊形當遮罩，只微調 mask decoder，
+#                       每 epoch 約 1 分鐘；--train-final 另訓練標註工具用的 decoder）
+python medsam_refine.py --stage1-run endplate_training_data/runs/learning_curve_20261013/frac_100 --annotations-dir endplate_training_data/runs/sixpoint_reviewed_20260922b_cv5/annotations --out-dir endplate_training_data/runs/medsam_refine_<日期> --epochs 20 --train-final
 
 # 4. 推論
 python inference_vertebra.py --model best_vertebra_model.pth --input spine.png --spine-type L
@@ -307,7 +328,8 @@ Spine/
 │   └── eval_ensemble.py             # 5-fold ensemble 評估
 │
 ├── 標註工具
-│   ├── spinal-annotation-web.html   # 椎體 4 角點 + 上下 middle point 標註工具
+│   ├── spinal-annotation-web.html   # 椎體 4 角點 + 上下 middle point 標註工具（含 MedSAM 框選輔助）
+│   ├── medsam_server.py             # MedSAM 框選輔助本機服務 (127.0.0.1:8003)
 │   └── pkl-contour-editor.html      # 外部 mask → 終板輪廓點編輯器
 │
 ├── 部署

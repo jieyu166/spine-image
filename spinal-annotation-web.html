@@ -110,6 +110,7 @@
         .btn-danger { background: #e74c3c; color: white; }
         .btn-secondary { background: #95a5a6; color: white; }
         .btn-info { background: #9b59b6; color: white; }
+        .btn-info.medsam-on { background: #00a8a8; box-shadow: 0 0 0 2px #7ff inset; }
 
         .canvas-container {
             flex: 1;
@@ -415,6 +416,11 @@
                         <button class="btn-secondary" onclick="zoomOut()">🔍-</button>
                         <button class="btn-secondary" onclick="resetZoom()">1:1</button>
                     </div>
+                    <div class="toolbar-group">
+                        <button class="btn-info" id="btnMedsam" onclick="toggleMedsamMode()" title="開啟後在椎體上拉框，自動產生該節的點（需先執行 python medsam_server.py）。先點選某一節再拉框＝修正該節。快捷鍵 M">🧠 MedSAM 框選 (M)</button>
+                        <button class="btn-secondary" id="btnMedsamAll" onclick="medsamRefineAll()" title="以每節現有點位的外接框當提示，用 MedSAM 重新求出所有完整椎體的 6 點" style="font-size:13px;">🧠 修整全部</button>
+                        <span id="medsamStatus" style="font-size:12px; color:#bbb;"></span>
+                    </div>
                 </div>
 
                 <div class="canvas-container">
@@ -496,8 +502,11 @@
                 <div class="export-panel">
                     <strong>💾 匯出數據</strong>
                     <div class="help-text">完成標註後匯出訓練數據</div>
-                    <button class="btn-success" onclick="exportData()">匯出 JSON</button>
+                    <button class="btn-success" onclick="saveToOriginal()" title="直接覆蓋原本讀取的 JSON；舊版自動備份到 _json_backups/（Ctrl+S）">💾 存回原檔 (Ctrl+S)</button>
+                    <button class="btn-success" onclick="exportData()">匯出 JSON（下載）</button>
                     <button class="btn-info" onclick="exportReport()">匯出報告</button>
+                    <button class="btn-secondary" onclick="grantImagesFolder()" style="font-size:12px;">📂 授權 Images 資料夾</button>
+                    <div class="help-text" id="saveTargetInfo">存回原檔需先授權 Images 資料夾（只需一次）</div>
                 </div>
             </div>
         </div>
@@ -637,6 +646,9 @@
 
             // 檢查是否從推理頁面跳轉過來 (自動匯入)
             checkAutoImport();
+            // 從 annotation-viewer.html「送到標註工具修正」開啟時，與 viewer 建立連線
+            initViewerBridge();
+            restoreImagesFolder();
         };
 
         // ==================== 影像處理 ====================
@@ -697,6 +709,8 @@
 
             resetCaseState();
             originalImage = img;
+            // MedSAM 上傳原始檔案位元組（不是 canvas 重新編碼），服務才能用檔案雜湊辨認外部測試集
+            medsamSource = { img, blob: (file && typeof file.arrayBuffer === 'function') ? file : null };
             currentImageMeta = {
                 filename: file.name || null,
                 width,
@@ -813,6 +827,8 @@
 
         function resetCaseState(options = {}) {
             const keepImage = options.keepImage === true;
+            if (!keepImage) currentJsonSource = null;
+            importedAnnotationReview = null;
 
             vertebrae = [];
             currentPoints = [];
@@ -831,6 +847,7 @@
             _justDragged = false;
             selectBox = null;
             selectedVertebrae.clear();
+            medsamBox = null;
 
             window._pendingSpineFM = null;
             window._spinefmJsonName = null;
@@ -902,6 +919,259 @@
             return inside;
         }
 
+        // ==================== MedSAM 框選輔助 ====================
+        // 本機服務 medsam_server.py（127.0.0.1:8003）：拉框 → 該節 6 點（邊界椎體 3 點）。
+        // 外部測試集影像會被服務拒絕。匯出時每節記錄 assist，annotationReview 記錄 assistedBy。
+        const MEDSAM_URL = 'http://127.0.0.1:8003';
+        const MEDSAM_BOX_MARGIN = 0.04;   // 與 medsam_refine.BOX_MARGIN 相同
+        const MEDSAM_LOW_IOU = 0.8;
+        const MEDSAM_FULL_KEYS = ['anteriorSuperior', 'middleSuperior', 'posteriorSuperior',
+                                  'posteriorInferior', 'middleInferior', 'anteriorInferior'];
+        const MEDSAM_UPPER_KEYS = ['anteriorSuperior', 'middleSuperior', 'posteriorSuperior'];
+        const MEDSAM_LOWER_KEYS = ['anteriorInferior', 'middleInferior', 'posteriorInferior'];
+        const MEDSAM_STALE = '影像或椎體已變更，已捨棄這次 MedSAM 結果';
+        let medsamMode = false;
+        let medsamBox = null;              // {startX, startY, endX, endY} 影像座標
+        let medsamBusy = false;
+        let medsamImage = { img: null, id: null };     // 服務端快取的是哪一張影像
+        let medsamSource = { img: null, blob: null };  // 該影像的原始檔案（若有）
+
+        function medsamBlocked() {
+            // 計算中不允許改動椎體，避免結果寫到錯的節
+            if (!medsamBusy) return false;
+            setMedsamStatus('MedSAM 計算中，請稍候', true);
+            return true;
+        }
+
+        function setMedsamStatus(text, isError = false) {
+            const el = document.getElementById('medsamStatus');
+            if (!el) return;
+            el.textContent = text || '';
+            el.style.color = isError ? '#ff8080' : '#bbb';
+        }
+
+        async function medsamHealth() {
+            const r = await fetch(MEDSAM_URL + '/health');
+            if (!r.ok) throw new Error(`MedSAM 服務回應 ${r.status}`);
+            return r.json();
+        }
+
+        async function toggleMedsamMode(force) {
+            const next = typeof force === 'boolean' ? force : !medsamMode;
+            if (next) {
+                if (!originalImage) { alert('請先載入影像'); return false; }
+                try {
+                    const h = await medsamHealth();
+                    setMedsamStatus(h.fine_tuned ? 'MedSAM 已連線：在椎體上拉框' : 'MedSAM 已連線（未微調權重）：在椎體上拉框');
+                } catch (err) {
+                    setMedsamStatus('MedSAM 未連線', true);
+                    alert('連不到 MedSAM 服務。請先在專案資料夾執行：\npython medsam_server.py');
+                    return false;
+                }
+            } else {
+                setMedsamStatus('');
+            }
+            medsamMode = next;
+            medsamBox = null;
+            const btn = document.getElementById('btnMedsam');
+            if (btn) btn.classList.toggle('medsam-on', medsamMode);
+            if (canvas) canvas.style.cursor = medsamMode ? 'crosshair' : 'default';
+            redraw();
+            updateUI();
+            return medsamMode;
+        }
+
+        function medsamImageBlob(img) {
+            if (medsamSource.img === img && medsamSource.blob) return Promise.resolve(medsamSource.blob);
+            return new Promise((resolve, reject) => {
+                const c = document.createElement('canvas');
+                c.width = img.naturalWidth || img.width;
+                c.height = img.naturalHeight || img.height;
+                c.getContext('2d').drawImage(img, 0, 0);
+                c.toBlob(b => b ? resolve(b) : reject(new Error('無法輸出影像給 MedSAM')), 'image/png');
+            });
+        }
+
+        async function medsamEnsureImage(img) {
+            if (medsamImage.img === img && medsamImage.id) return medsamImage.id;
+            const sha = currentImageMeta && currentImageMeta.sha256;   // await 之前先取，避免換片後拿到別張的
+            const form = new FormData();
+            form.append('file', await medsamImageBlob(img), 'image.png');
+            if (sha) form.append('sha256', sha);
+            const r = await fetch(MEDSAM_URL + '/image', { method: 'POST', body: form });
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(body.detail || `上傳影像失敗（${r.status}）`);
+            if (img !== originalImage) throw new Error(MEDSAM_STALE);
+            medsamImage = { img, id: body.image_id };
+            return body.image_id;
+        }
+
+        async function medsamSegment(box, boundaryType, hintPoints, neighborPoints) {
+            const img = originalImage;
+            const send = id => fetch(MEDSAM_URL + '/segment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image_id: id, box, boundary: boundaryType || null,
+                                       hint_points: hintPoints || null, neighbor_points: neighborPoints || null }),
+            });
+            let r = await send(await medsamEnsureImage(img));
+            if (r.status === 404) {          // 服務重啟過，影像快取不見了
+                medsamImage = { img: null, id: null };
+                r = await send(await medsamEnsureImage(img));
+            }
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(body.detail || `MedSAM 失敗（${r.status}）`);
+            if (img !== originalImage) throw new Error(MEDSAM_STALE);
+            return body;
+        }
+
+        function medsamNeighborHint() {
+            // 新增下一節時，以最後一節已標椎體的方向當參考（處理傾斜超過 45° 的椎體）
+            for (let i = vertebrae.length - 1; i >= 0; i--) {
+                const v = vertebrae[i];
+                if (v.points && v.points.length >= 3) return medsamArrayToNamed(v.points, v.boundaryType || null);
+            }
+            return null;
+        }
+
+        function medsamKeys(boundaryType) {
+            return boundaryType === 'upper' ? MEDSAM_UPPER_KEYS
+                 : boundaryType === 'lower' ? MEDSAM_LOWER_KEYS : MEDSAM_FULL_KEYS;
+        }
+
+        function medsamPointsToArray(named, boundaryType) {
+            return medsamKeys(boundaryType).map(k => {
+                if (!named || !named[k]) throw new Error(`MedSAM 回傳缺少 ${k}`);
+                return { x: named[k].x, y: named[k].y };
+            });
+        }
+
+        function medsamArrayToNamed(points, boundaryType) {
+            const out = {};
+            medsamKeys(boundaryType).forEach((k, i) => { if (points[i]) out[k] = { x: points[i].x, y: points[i].y }; });
+            return out;
+        }
+
+        function medsamNormalizeBox(raw) {
+            return [Math.min(raw[0], raw[2]), Math.min(raw[1], raw[3]), Math.max(raw[0], raw[2]), Math.max(raw[1], raw[3])];
+        }
+
+        function medsamBoxFromPoints(points) {
+            const xs = points.map(p => p.x), ys = points.map(p => p.y);
+            const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+            const m = MEDSAM_BOX_MARGIN * Math.max(x1 - x0, y1 - y0);
+            return [x0 - m, y0 - m, x1 + m, y1 + m];
+        }
+
+        function medsamAssistRecord(iou) {
+            return { method: 'MedSAM', iou: Math.round(iou * 1000) / 1000, edited: false };
+        }
+
+        async function medsamApplyBox(rawBox) {
+            if (medsamBusy || !originalImage) return false;
+            const box = medsamNormalizeBox(rawBox);
+            if (box[2] - box[0] < 10 || box[3] - box[1] < 10) return false;
+            if (currentPoints.length > 0) {
+                alert('這一節已經點了部分點。請先完成或撤銷，再用 MedSAM 框選。');
+                return false;
+            }
+            let target = null, name, boundaryType;
+            if (selectedVertebrae.size === 1) {
+                target = vertebrae[[...selectedVertebrae][0]];
+                name = target.name;
+                boundaryType = target.boundaryType || null;
+            } else {
+                name = getNextVertebraName();
+                if (!name) {
+                    alert('沒有下一節可標。要修正某一節，請先點選該節（側欄點名稱或 Shift 框選），再拉框。');
+                    return false;
+                }
+                boundaryType = isBoundary(name);
+            }
+            medsamBusy = true;
+            setMedsamStatus(`MedSAM 計算 ${name}…`);
+            try {
+                // 修正某一節：以該節現有點位決定方向；新增：以鄰近椎體方向當參考
+                const res = target
+                    ? await medsamSegment(box, boundaryType, medsamArrayToNamed(target.points, boundaryType), null)
+                    : await medsamSegment(box, boundaryType, null, medsamNeighborHint());
+                const pts = medsamPointsToArray(res.points, boundaryType);
+                const assist = medsamAssistRecord(res.iou);
+                if (target) {
+                    const idx = vertebrae.indexOf(target);
+                    if (idx < 0) throw new Error(MEDSAM_STALE);
+                    Object.assign(target, { points: pts, hasMiddlePoints: true, assist });
+                    calculateVertebraMetrics(idx);
+                    selectedVertebrae.clear();   // 修正完就取消選取，下一個框才會是新增下一節
+                } else {
+                    if (getNextVertebraName() !== name || currentPoints.length > 0) throw new Error(MEDSAM_STALE);
+                    vertebrae.push({ name, points: pts, boundaryType, anteriorHeight: null, posteriorHeight: null,
+                                     hasMiddlePoints: true, assist });
+                    calculateVertebraMetrics(vertebrae.length - 1);
+                }
+                markAnnotationDirty();
+                const low = res.iou < MEDSAM_LOW_IOU;
+                setMedsamStatus(`${name}：預測 IoU ${res.iou.toFixed(2)}${low ? '，偏低，請仔細檢查' : ''}`, low);
+                return true;
+            } catch (err) {
+                setMedsamStatus(err.message, true);
+                if (err.message !== MEDSAM_STALE) alert(err.message);
+                return false;
+            } finally {
+                medsamBusy = false;
+                redraw();
+                updateUI();
+            }
+        }
+
+        async function medsamRefineAll() {
+            if (!originalImage || medsamBusy) return 0;
+            const targets = vertebrae.filter(v => !v.boundaryType && v.points.length === 6);   // 存物件參考，不存索引
+            if (!targets.length) { alert('沒有完整椎體可以修整。'); return 0; }
+            if (!confirm(`用 MedSAM 重新求出 ${targets.length} 節完整椎體的 6 點？\n（T12／S1 等只有單一終板的不會動。不滿意可重新匯入原 JSON 還原。）`)) return 0;
+            try { await medsamHealth(); } catch (err) {
+                alert('連不到 MedSAM 服務。請先在專案資料夾執行：\npython medsam_server.py');
+                return 0;
+            }
+            medsamBusy = true;
+            const failed = [];
+            let done = 0;
+            try {
+                for (const v of targets) {
+                    setMedsamStatus(`修整 ${v.name}（${done + 1}/${targets.length}）…`);
+                    try {
+                        const res = await medsamSegment(medsamBoxFromPoints(v.points), null, medsamArrayToNamed(v.points, null), null);
+                        const idx = vertebrae.indexOf(v);
+                        if (idx < 0 || v.boundaryType) throw new Error(MEDSAM_STALE);
+                        v.points = medsamPointsToArray(res.points, null);
+                        v.hasMiddlePoints = true;
+                        v.assist = medsamAssistRecord(res.iou);
+                        if (res.iou < MEDSAM_LOW_IOU) failed.push(`${v.name}（IoU ${res.iou.toFixed(2)}，已套用，請檢查）`);
+                        calculateVertebraMetrics(idx);
+                        done++;
+                    } catch (err) {
+                        failed.push(`${v.name}：${err.message}`);
+                        if (/外部測試集/.test(err.message) || err.message === MEDSAM_STALE) break;
+                    }
+                }
+                if (done) markAnnotationDirty();
+            } finally {
+                medsamBusy = false;
+                redraw();
+                updateUI();
+            }
+            setMedsamStatus(`已修整 ${done}/${targets.length} 節`, failed.length > 0);
+            if (failed.length) alert('需要注意：\n' + failed.join('\n'));
+            return done;
+        }
+
+        function medsamMarkEdited(indices) {
+            for (const i of indices) {
+                const v = vertebrae[i];
+                if (v && v.assist) v.assist.edited = true;
+            }
+        }
+
         function handleMouseDown(e) {
             if (e.button === 1 || e.button === 2) {
                 isDragging = true;
@@ -911,6 +1181,7 @@
             }
 
             if (e.button !== 0) return;
+            if (medsamBlocked()) { _justDragged = true; return; }
             const {imgX, imgY} = _canvasToImage(e);
             const hitRadius = 12 / zoom;
 
@@ -919,6 +1190,13 @@
                 selectBox = {startX: imgX, startY: imgY, endX: imgX, endY: imgY};
                 e.preventDefault();
                 canvas.style.cursor = 'crosshair';
+                return;
+            }
+
+            // ── MedSAM 模式: 拉框（點到既有點位時仍是拖曳點） ──
+            if (medsamMode && !e.shiftKey && !_findNearestPoint(imgX, imgY, hitRadius)) {
+                medsamBox = {startX: imgX, startY: imgY, endX: imgX, endY: imgY};
+                e.preventDefault();
                 return;
             }
 
@@ -972,6 +1250,15 @@
         }
 
         function handleMouseMove(e) {
+            // ── MedSAM 拉框 ──
+            if (medsamBox) {
+                const {imgX, imgY} = _canvasToImage(e);
+                medsamBox.endX = imgX;
+                medsamBox.endY = imgY;
+                redraw();
+                return;
+            }
+
             // ── 框選 ──
             if (selectBox) {
                 const {imgX, imgY} = _canvasToImage(e);
@@ -1045,6 +1332,16 @@
         }
 
         function handleMouseUp(e) {
+            // ── MedSAM 拉框結束 ──
+            if (medsamBox) {
+                const b = medsamBox;
+                medsamBox = null;
+                _justDragged = true;
+                redraw();
+                medsamApplyBox([b.startX, b.startY, b.endX, b.endY]);
+                return;
+            }
+
             // ── 框選結束 ──
             if (selectBox) {
                 _finishBoxSelect();
@@ -1060,6 +1357,7 @@
                 for (const vi of selectedVertebrae) {
                     calculateVertebraMetrics(vi);
                 }
+                medsamMarkEdited(selectedVertebrae);
                 groupDrag = null;
                 _justDragged = true;
                 canvas.style.cursor = 'move';
@@ -1070,6 +1368,7 @@
             // ── 單點拖曳結束 ──
             if (dragInfo) {
                 calculateVertebraMetrics(dragInfo.vertebraIdx);
+                medsamMarkEdited([dragInfo.vertebraIdx]);
                 updateUI();
                 dragInfo = null;
                 _justDragged = true;
@@ -1111,6 +1410,7 @@
         }
 
         function deleteSelectedVertebrae() {
+            if (medsamBlocked()) return;
             if (selectedVertebrae.size === 0) return;
             const names = [...selectedVertebrae].map(i => vertebrae[i].name).join(', ');
             if (!confirm(`刪除 ${selectedVertebrae.size} 個椎體？\n${names}`)) return;
@@ -1170,6 +1470,9 @@
         // ==================== 點擊處理 ====================
         function handleCanvasClick(event) {
             if (!originalImage || isDragging || _justDragged) { _justDragged = false; return; }
+
+            // MedSAM 模式下用拉框產生點位，單擊不新增點
+            if (medsamMode) return;
 
             // Shift 鍵保留給框選，不新增點
             if (event.shiftKey) return;
@@ -1347,9 +1650,25 @@
 
         // ==================== 快捷鍵 ====================
         function handleKeyDown(e) {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+                e.preventDefault();
+                saveToOriginal();
+                return;
+            }
             if (e.ctrlKey && e.key === 'z') {
                 e.preventDefault();
                 undoPoint();
+            }
+            const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement && document.activeElement.tagName) || '');
+            if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey && !typing) {
+                e.preventDefault();
+                toggleMedsamMode();
+                return;
+            }
+            if (e.key === 'Escape' && medsamBox) {
+                medsamBox = null;
+                redraw();
+                return;
             }
             if ((e.key === 'Delete' || e.key === 'Backspace') && selectedVertebrae.size > 0) {
                 e.preventDefault();
@@ -1365,6 +1684,7 @@
         }
 
         function undoPoint() {
+            if (medsamBlocked()) return;
             if (currentPoints.length > 0) {
                 currentPoints.pop();
                 markAnnotationDirty();
@@ -1380,6 +1700,7 @@
         }
 
         function deleteCurrentVertebra() {
+            if (medsamBlocked()) return;
             if (currentPoints.length > 0) {
                 currentPoints = [];
                 markAnnotationDirty();
@@ -1395,6 +1716,7 @@
         }
 
         function clearAll() {
+            if (medsamBlocked()) return;
             if (confirm('確定清除所有標註？')) {
                 resetCaseState({ keepImage: true });
                 markAnnotationDirty();
@@ -1490,7 +1812,10 @@
             reader.onload = function(e) {
                 try {
                     const data = JSON.parse(e.target.result);
-                    importAnnotationJson(data, { jsonFilename: file.name });
+                    if (importAnnotationJson(data, { jsonFilename: file.name })) {
+                        currentJsonSource = { name: file.name, relPath: null };
+                        updateSaveUI();
+                    }
                 } catch(err) {
                     alert('JSON 解析失敗: ' + err.message);
                 }
@@ -1681,6 +2006,7 @@
                     posteriorHeight: null,
                     middleHeight: null
                 };
+                if (sv.assist && typeof sv.assist === 'object') v.assist = { ...sv.assist };
                 vertebrae.push(v);
             }
 
@@ -1693,6 +2019,7 @@
             annotationFinished = true;
             endplatePointMode = 3; // 匯入後以 3 點模式顯示
             applyCaseFlags(data && data.caseFlags); // 舊 JSON 沒有 caseFlags → 全部預設值
+            importedAnnotationReview = (data && typeof data.annotationReview === 'object') ? data.annotationReview : null;
             markAnnotationDirty();
 
             redraw();
@@ -1851,6 +2178,351 @@
             return true;
         }
 
+        // ==================== 存回原檔（File System Access API） ====================
+        // 一般檔案選擇器只能讀，存檔只能下載到 Downloads。授權 Images 資料夾（只需一次，handle 存在
+        // IndexedDB，下次開啟只要再按一次允許）後，「存回原檔」直接覆蓋原本讀取的 JSON：
+        //   - 從 viewer 批次模式送來：用完整相對路徑（例如 Images/202609/x.json）精準定位；
+        //   - 自行匯入 JSON：在授權資料夾內依檔名搜尋，唯一才寫，同名多個就拒絕；
+        //   - 目標 JSON 主檔名必須與目前影像相同；
+        //   - 覆蓋前把舊內容備份到 <授權資料夾>/_json_backups/<路徑>.<時間>.bak（.bak 不會被訓練或 viewer 掃到）。
+        // 注意：覆蓋會改變檔案 SHA-256，舊的 training allowlist 會判定 stale，需要重建。
+        const HANDLE_DB = 'spine-annotation-tool';
+        const HANDLE_STORE = 'handles';
+        const HANDLE_KEY = 'imagesDir';
+        const BACKUP_DIR = '_json_backups';
+        let imagesDirHandle = null;
+        let currentJsonSource = null;
+
+        function idbHandle(mode, value) {
+            return new Promise(resolve => {
+                if (typeof indexedDB === 'undefined') return resolve(null);
+                let request;
+                try { request = indexedDB.open(HANDLE_DB, 1); } catch (error) { return resolve(null); }
+                request.onupgradeneeded = () => request.result.createObjectStore(HANDLE_STORE);
+                request.onerror = () => resolve(null);
+                request.onsuccess = () => {
+                    try {
+                        const tx = request.result.transaction(HANDLE_STORE, mode === 'put' ? 'readwrite' : 'readonly');
+                        const store = tx.objectStore(HANDLE_STORE);
+                        const op = mode === 'put' ? store.put(value, HANDLE_KEY) : store.get(HANDLE_KEY);
+                        op.onsuccess = () => resolve(mode === 'put' ? true : (op.result || null));
+                        op.onerror = () => resolve(null);
+                    } catch (error) {
+                        resolve(null);
+                    }
+                };
+            });
+        }
+
+        function updateSaveUI() {
+            const info = document.getElementById('saveTargetInfo');
+            if (!info) return;
+            const folder = imagesDirHandle ? `已授權資料夾：${imagesDirHandle.name}` : '尚未授權 Images 資料夾';
+            const target = currentJsonSource
+                ? `；存回目標：${currentJsonSource.relPath || currentJsonSource.name}`
+                : '；目前沒有讀取中的 JSON';
+            info.textContent = folder + target;
+        }
+
+        async function restoreImagesFolder() {
+            if (!imagesDirHandle) imagesDirHandle = await idbHandle('get');
+            updateSaveUI();
+            return imagesDirHandle;
+        }
+
+        async function grantImagesFolder() {
+            if (typeof window.showDirectoryPicker !== 'function') {
+                alert('此瀏覽器不支援直接寫回檔案，請改用 Chrome 或 Edge；或使用「匯出 JSON（下載）」。');
+                return false;
+            }
+            try {
+                imagesDirHandle = await window.showDirectoryPicker({ id: 'spine-images', mode: 'readwrite' });
+            } catch (error) {
+                if (error && error.name !== 'AbortError') alert('無法取得資料夾權限：' + error.message);
+                return false;
+            }
+            await idbHandle('put', imagesDirHandle);
+            updateSaveUI();
+            return true;
+        }
+
+        async function ensureWritePermission(handle) {
+            if (!handle || typeof handle.queryPermission !== 'function') return true;
+            const options = { mode: 'readwrite' };
+            if (await handle.queryPermission(options) === 'granted') return true;
+            return (await handle.requestPermission(options)) === 'granted';
+        }
+
+        function splitRelPath(relPath, rootName) {
+            const parts = String(relPath || '').replace(/\\/g, '/').split('/').filter(Boolean);
+            if (parts.length > 1 && rootName && parts[0].toLowerCase() === String(rootName).toLowerCase()) parts.shift();
+            return parts;
+        }
+
+        async function findJsonByName(dir, name, prefix = [], depth = 0, out = []) {
+            for await (const entry of dir.values()) {
+                if (entry.kind === 'file' && entry.name.toLowerCase() === String(name).toLowerCase()) {
+                    out.push({ handle: entry, parts: [...prefix, entry.name] });
+                } else if (entry.kind === 'directory' && entry.name !== BACKUP_DIR && depth < 4) {
+                    await findJsonByName(entry, name, [...prefix, entry.name], depth + 1, out);
+                }
+            }
+            return out;
+        }
+
+        async function resolveTargetJson(root) {
+            const src = currentJsonSource;
+            if (!src || !(src.name || src.relPath)) {
+                return resolveNewJsonBesideImage(root);
+            }
+            const parts = src.relPath ? splitRelPath(src.relPath, root.name) : [];
+            if (parts.length > 1) {
+                try {
+                    let dir = root;
+                    for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+                    return { handle: await dir.getFileHandle(parts[parts.length - 1]), parts };
+                } catch (error) {
+                    // 路徑對不上（例如授權的是上層或下層資料夾）→ 改用檔名搜尋
+                }
+            }
+            const name = parts.length ? parts[parts.length - 1] : src.name;
+            const matches = await findJsonByName(root, name);
+            if (matches.length === 1) return matches[0];
+            if (!matches.length) return { error: `在授權的資料夾「${root.name}」裡找不到 ${name}。` };
+            return { error: `資料夾裡有 ${matches.length} 個同名的 ${name}，為避免覆蓋錯檔已取消。請從 viewer 批次模式送過來（帶完整路徑）。` };
+        }
+
+        // 尚未有 JSON 的新標註：在授權資料夾內找到目前影像（唯一），在同一層建立 <主檔名>.json
+        async function resolveNewJsonBesideImage(root) {
+            const imageName = currentImageMeta?.filename;
+            if (!imageName) return { error: '目前影像沒有檔名，無法決定 JSON 要存在哪裡。' };
+            const matches = await findJsonByName(root, imageName);
+            if (!matches.length) return { error: `在授權的資料夾「${root.name}」裡找不到影像 ${imageName}。` };
+            if (matches.length > 1) return { error: `資料夾裡有 ${matches.length} 個同名影像 ${imageName}，為避免存錯位置已取消。` };
+            const imageParts = matches[0].parts;
+            let dir = root;
+            for (const part of imageParts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+            const jsonName = imageParts[imageParts.length - 1].replace(/\.[^.]+$/, '') + '.json';
+            let exists = true;
+            try { await dir.getFileHandle(jsonName); } catch (error) { exists = false; }
+            if (exists && !confirm(`${jsonName} 已經存在，但目前沒有載入它。確定要覆蓋？（舊版會備份）`)) {
+                return { error: '已取消，未覆蓋既有的 JSON。' };
+            }
+            return {
+                handle: await dir.getFileHandle(jsonName, { create: true }),
+                parts: [...imageParts.slice(0, -1), jsonName],
+                created: !exists,
+            };
+        }
+
+        function backupStamp(date = new Date()) {
+            const pad = value => String(value).padStart(2, '0');
+            return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
+                `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+        }
+
+        // 內容相同（忽略每次都會變的 exportDate）就不重寫、不產生備份
+        // 內容相同（忽略每次都會變的 exportDate、reviewedAt）就不重寫、不產生備份。
+        // 原檔還標著「醫師未審」（例如 AI 預標註）時一定寫入，審閱紀錄才會留下。
+        function sameAnnotationContent(oldText, data) {
+            try {
+                const old = JSON.parse(oldText);
+                if (!old.annotationReview || old.annotationReview.physicianReviewed !== true) return false;
+                const strip = obj => {
+                    const { exportDate: _date, annotationReview, ...rest } = obj;
+                    const { reviewedAt: _at, ...review } = annotationReview || {};
+                    return JSON.stringify({ ...rest, annotationReview: review });
+                };
+                return strip(old) === strip(data);
+            } catch (error) {
+                return false;
+            }
+        }
+
+        // 審閱紀錄：保留原本的產生方式（例如 AI visual annotation），標註為醫師已審。
+        let importedAnnotationReview = null;
+        function buildAnnotationReview() {
+            const prior = importedAnnotationReview || {};
+            const review = {
+                method: prior.method || 'physician annotation',
+                physicianReviewed: true,
+                reviewedAt: new Date().toISOString(),
+                reviewedWith: 'spinal-annotation-web.html',
+            };
+            if (prior.note) review.priorNote = prior.note;
+            if (prior.physicianReviewed === false) review.previouslyUnreviewed = true;
+            const assisted = vertebrae.filter(v => v.assist && v.assist.method === 'MedSAM');
+            if (assisted.length) {
+                // 標註來源追蹤：之後評估或重訓時，可分辨哪些標準答案經過模型輔助
+                review.assistedBy = {
+                    method: 'MedSAM',
+                    vertebrae: assisted.length,
+                    editedAfterAssist: assisted.filter(v => v.assist.edited).length,
+                };
+            }
+            return review;
+        }
+
+        async function writeText(fileHandle, text) {
+            const writable = await fileHandle.createWritable();
+            await writable.write(text);
+            await writable.close();
+        }
+
+        function setTaskMessage(message) {
+            const task = document.getElementById('taskText');
+            if (task) task.textContent = message;
+        }
+
+        async function saveToOriginal() {
+            const data = buildExportData();
+            if (!data) return false;
+            if (!imagesDirHandle) await restoreImagesFolder();
+            if (!imagesDirHandle) {
+                if (!confirm('尚未授權 Images 資料夾。現在選擇資料夾，以便直接存回原檔？')) return false;
+                if (!(await grantImagesFolder())) return false;
+            }
+            if (!(await ensureWritePermission(imagesDirHandle))) {
+                alert('沒有取得寫入權限，未存檔。可改用「匯出 JSON（下載）」。');
+                return false;
+            }
+            const target = await resolveTargetJson(imagesDirHandle);
+            if (target.error) {
+                alert(target.error + '\n\n可改用「匯出 JSON（下載）」。');
+                return false;
+            }
+            const targetName = target.parts[target.parts.length - 1];
+            const imageStem = filenameStem(currentImageMeta?.filename);
+            if (imageStem && filenameStem(targetName, true) !== imageStem) {
+                alert(`存回目標 ${targetName} 與目前影像 ${currentImageMeta.filename} 的主檔名不同，為避免覆蓋錯檔已取消。`);
+                return false;
+            }
+            const relative = target.parts.join('/');
+            const newText = JSON.stringify(data, null, 2);
+            const oldText = await (await target.handle.getFile()).text();
+            if (target.created || !oldText) {
+                await writeText(target.handle, newText);
+                annotationDirty = false;
+                currentJsonSource = { name: targetName, relPath: [imagesDirHandle.name, ...target.parts].join('/') };
+                updateSaveUI();
+                notifyViewerOfExport(data, targetName, relative);
+                setTaskMessage(`已建立 ${imagesDirHandle.name}/${relative}`);
+                return { path: relative, backup: null, unchanged: false, created: true };
+            }
+            if (sameAnnotationContent(oldText, data)) {
+                annotationDirty = false;
+                setTaskMessage(`${relative} 內容沒有變更，未重新寫入。`);
+                return { path: relative, backup: null, unchanged: true };
+            }
+            const backupDir = await imagesDirHandle.getDirectoryHandle(BACKUP_DIR, { create: true });
+            const backupName = `${target.parts.join('__')}.${backupStamp()}.bak`;
+            await writeText(await backupDir.getFileHandle(backupName, { create: true }), oldText);
+            await writeText(target.handle, newText);
+            annotationDirty = false;
+            notifyViewerOfExport(data, targetName, relative);
+            setTaskMessage(`已存回 ${imagesDirHandle.name}/${relative}（舊版備份：${BACKUP_DIR}/${backupName}）`);
+            return { path: relative, backup: `${BACKUP_DIR}/${backupName}`, unchanged: false };
+        }
+
+        // ==================== 與 annotation-viewer.html 連線 ====================
+        // viewer 以 ?import=viewer 開啟本頁並以 postMessage 傳入 {type: 'spine-viewer-case', imageFile, jsonText, ...}；
+        // 本頁匯出 JSON 時回傳 {type: 'spine-editor-exported', jsonText, filename, sourceImagePath} 讓 viewer 即時重畫。
+        let viewerLink = null;
+
+        function initViewerBridge() {
+            window.addEventListener('message', handleViewerMessage);
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('import') === 'viewer' && window.opener) {
+                window.opener.postMessage({ type: 'spine-editor-ready' }, '*');
+            }
+        }
+
+        function decodeImageBlob(blob) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(reader.error || new Error('影像讀取失敗'));
+                reader.onload = event => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = () => reject(new Error('影像解碼失敗'));
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(blob);
+            });
+        }
+
+        async function handleViewerMessage(event) {
+            const data = event && event.data;
+            if (!data || data.type !== 'spine-viewer-case') return false;
+            if (window.opener && event.source && event.source !== window.opener) return false;
+            const imageFile = data.imageFile;
+            if (!imageFile || typeof imageFile.arrayBuffer !== 'function') return false;
+            if (!confirmDiscardUnsavedChanges()) return false;
+
+            const requestToken = ++imageLoadToken;
+            let img;
+            try {
+                img = await decodeImageBlob(imageFile);
+            } catch (error) {
+                alert(`無法載入 viewer 傳來的影像：${error.message}`);
+                return false;
+            }
+            const sha256 = await calculateFileSha256(imageFile);
+            if (requestToken !== imageLoadToken) return false;
+            const fileMeta = {
+                name: imageFile.name || data.imageName || null,
+                size: imageFile.size,
+                lastModified: imageFile.lastModified,
+            };
+            commitLoadedImage(img, fileMeta, sha256);
+            viewerLink = {
+                source: event.source || window.opener || null,
+                sourceImagePath: data.sourceImagePath || fileMeta.name,
+                sourceJsonPath: data.sourceJsonPath || null,
+            };
+
+            let imported = true;
+            if (data.jsonText) {
+                try {
+                    imported = importAnnotationJson(JSON.parse(data.jsonText), {
+                        jsonFilename: data.jsonName || null,
+                        replaceConfirmed: true,
+                        silent: true,
+                    });
+                } catch (error) {
+                    alert(`viewer 傳來的 JSON 無法解析：${error.message}`);
+                    imported = false;
+                }
+            }
+            if (imported && data.jsonText) {
+                currentJsonSource = { name: data.jsonName || null, relPath: data.sourceJsonPath || null };
+                updateSaveUI();
+            }
+            const task = document.getElementById('taskText');
+            if (task) {
+                task.textContent = imported
+                    ? `已從 viewer 載入 ${viewerLink.sourceImagePath}，修正後按「匯出 JSON」會同步回 viewer。`
+                    : `已從 viewer 載入影像 ${viewerLink.sourceImagePath}，但標註未載入（見提示）。`;
+            }
+            document.title = `修正：${viewerLink.sourceImagePath}`;
+            return imported;
+        }
+
+        function notifyViewerOfExport(data, filename, savedPath = null) {
+            if (!viewerLink || !viewerLink.source || viewerLink.source.closed) return false;
+            if (typeof viewerLink.source.postMessage !== 'function') return false;
+            viewerLink.source.postMessage({
+                type: 'spine-editor-exported',
+                jsonText: JSON.stringify(data, null, 2),
+                filename,
+                savedToOriginal: !!savedPath,
+                savedPath,
+                sourceImagePath: viewerLink.sourceImagePath,
+                sourceJsonPath: viewerLink.sourceJsonPath,
+            }, '*');
+            return true;
+        }
+
         // 自動從 sessionStorage 載入推理結果 (從 inference web 跳轉)
         function checkAutoImport() {
             const params = new URLSearchParams(window.location.search);
@@ -1938,6 +2610,21 @@
                 ctx.fillStyle = 'rgba(255, 50, 50, 0.12)';
                 ctx.fillRect(x, y, w, h);
                 ctx.strokeStyle = '#ff3333';
+                ctx.lineWidth = 2 / zoom;
+                ctx.setLineDash([6 / zoom, 4 / zoom]);
+                ctx.strokeRect(x, y, w, h);
+                ctx.setLineDash([]);
+            }
+
+            // MedSAM 拉框
+            if (medsamBox) {
+                const x = Math.min(medsamBox.startX, medsamBox.endX);
+                const y = Math.min(medsamBox.startY, medsamBox.endY);
+                const w = Math.abs(medsamBox.endX - medsamBox.startX);
+                const h = Math.abs(medsamBox.endY - medsamBox.startY);
+                ctx.fillStyle = 'rgba(0, 220, 220, 0.10)';
+                ctx.fillRect(x, y, w, h);
+                ctx.strokeStyle = '#00e5e5';
                 ctx.lineWidth = 2 / zoom;
                 ctx.setLineDash([6 / zoom, 4 / zoom]);
                 ctx.strokeRect(x, y, w, h);
@@ -2542,8 +3229,8 @@
         }
 
         // ==================== 匯出 ====================
-        function exportData() {
-            if (vertebrae.length === 0) { alert('請先完成標註'); return; }
+        function buildExportData() {
+            if (vertebrae.length === 0) { alert('請先完成標註'); return null; }
 
             const ordered = getAnatomicalOrder();
 
@@ -2575,6 +3262,7 @@
                 spineType: spineType,
                 endplatePointMode: endplatePointMode,
                 caseFlags: getCaseFlags(),
+                annotationReview: buildAnnotationReview(),
                 imageInfo: originalImage ? {
                     filename: currentImageMeta?.filename || null,
                     width: currentImageMeta?.width || originalImage.naturalWidth || originalImage.width,
@@ -2589,6 +3277,7 @@
                         boundaryType: v.boundaryType || null,
                         hasMiddlePoints: v.hasMiddlePoints
                     };
+                    if (v.assist) entry.assist = { ...v.assist };
                     if (v.boundaryType === 'upper') {
                         entry.points = {
                             anteriorSuperior: v.points[0],
@@ -2641,6 +3330,12 @@
                 }
             };
 
+            return data;
+        }
+
+        function exportData() {
+            const data = buildExportData();
+            if (!data) return;
             const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -2650,6 +3345,7 @@
             a.click();
             URL.revokeObjectURL(url);
             annotationDirty = false;
+            notifyViewerOfExport(data, a.download);
         }
 
         function exportReport() {

@@ -167,6 +167,7 @@
                         <button class="btn-primary" onclick="pickImage()">📷 載入影像</button>
                         <button class="btn-success" onclick="pickJson()">📋 載入 JSON</button>
                         <button class="btn-warning" onclick="pickReviewFolder()">📁 批次審查資料夾</button>
+                        <button class="btn-primary" id="btnSendToEditor" onclick="sendToAnnotationEditor()" title="把目前的影像與 JSON 送到 spinal-annotation-web.html 修正（批次模式快捷鍵 E）">✏️ 送到標註工具修正</button>
                     </div>
                     <div class="toolbar-group">
                         <button class="btn-secondary" onclick="zoomIn()">🔍+</button>
@@ -239,6 +240,7 @@
                         <button class="decision-match" onclick="markBatchMatch()">✓ 相符 (M)</button>
                         <button class="decision-mismatch" onclick="markBatchMismatch()">✗ 不相符 (X)</button>
                         <button class="btn-secondary" onclick="skipBatchPair()">略過 (S)</button>
+                        <button class="btn-primary" onclick="sendToAnnotationEditor()">✏️ 修正 (E)</button>
                     </div>
                     <div class="batch-flags" style="margin:6px 0; padding:6px; border:1px solid #444; border-radius:4px;">
                         <label>
@@ -785,6 +787,10 @@
                     const normalized = normalizeAnnotation(raw);
                     normalized._fileName = pair.jsonPath;
                     normalized._imageFileName = pair.imagePath;
+                    setCurrentSource({
+                        imageFile: pair.imageFile, imagePath: pair.imagePath,
+                        jsonFile: pair.jsonFile, jsonPath: pair.jsonPath,
+                    }, true);
 
                     batchReviewMode = true;
                     originalImage = image;
@@ -1039,6 +1045,7 @@
             // Paste
             document.addEventListener('paste', handlePaste);
             document.addEventListener('keydown', handleBatchShortcut);
+            window.addEventListener('message', handleEditorMessage);
 
             // Drag & drop
             const zone = document.getElementById('dropZone');
@@ -1063,6 +1070,118 @@
         }
 
         // ==================== File Handling ====================
+        // ==================== 送到標註工具修正 ====================
+        // 協定（視窗間 postMessage；file:// 下 origin 為 "null"，改以 event.source 核對來源視窗）：
+        //   viewer 開啟 spinal-annotation-web.html?import=viewer（固定視窗名稱，重複送出沿用同一分頁）
+        //   editor → viewer：{type: 'spine-editor-ready'}；viewer 回 {type: 'spine-viewer-case', imageFile, jsonText, ...}
+        //   editor 匯出 JSON 時 → viewer：{type: 'spine-editor-exported', jsonText, filename, sourceImagePath}
+        //   viewer 以修正版重畫疊圖（原檔仍需用下載的 JSON 覆蓋）。
+        // 不走 sessionStorage：腰椎 PNG 常 4–5 MB，超過 storage 上限；postMessage 可直接傳 File 物件。
+        const EDITOR_WINDOW_NAME = 'spinalAnnotationEditor';
+        const EDITOR_URL = 'spinal-annotation-web.html?import=viewer';
+        let currentSource = { imageFile: null, jsonFile: null, imagePath: null, jsonPath: null };
+        let annotationEditorWindow = null;
+        let pendingEditorPayload = null;
+
+        function setCurrentSource(update, replace = false) {
+            currentSource = replace
+                ? { imageFile: null, jsonFile: null, imagePath: null, jsonPath: null, ...update }
+                : { ...currentSource, ...update };
+        }
+
+        async function buildEditorPayload() {
+            const imageFile = currentSource.imageFile;
+            if (!imageFile) {
+                alert('請先載入影像，再送到標註工具。');
+                return null;
+            }
+            const imageName = imageFile.name || currentSource.imagePath || 'image.png';
+            if (/\.dcm$/i.test(imageName)) {
+                alert('DICOM 影像請先轉成 PNG 再送到標註工具（標註工具不支援 DICOM）。');
+                return null;
+            }
+            const jsonText = currentSource.jsonFile ? await readTextFile(currentSource.jsonFile) : null;
+            return {
+                type: 'spine-viewer-case',
+                imageFile,
+                imageName,
+                jsonText,
+                jsonName: currentSource.jsonFile ? (currentSource.jsonFile.name || currentSource.jsonPath) : null,
+                sourceImagePath: currentSource.imagePath || imageName,
+                sourceJsonPath: currentSource.jsonPath || null,
+            };
+        }
+
+        async function sendToAnnotationEditor() {
+            const payload = await buildEditorPayload();
+            if (!payload) return false;
+            if (annotationEditorWindow && !annotationEditorWindow.closed) {
+                annotationEditorWindow.postMessage(payload, '*');
+                if (typeof annotationEditorWindow.focus === 'function') annotationEditorWindow.focus();
+                setStatusMessage(`已送到標註工具：${payload.sourceImagePath}`);
+                return true;
+            }
+            pendingEditorPayload = payload;
+            annotationEditorWindow = window.open(EDITOR_URL, EDITOR_WINDOW_NAME);
+            if (!annotationEditorWindow) {
+                pendingEditorPayload = null;
+                alert('瀏覽器擋住了新視窗，請允許此頁開啟彈出式視窗後再試一次。');
+                return false;
+            }
+            setStatusMessage(`開啟標註工具中：${payload.sourceImagePath}`);
+            return true;
+        }
+
+        function handleEditorMessage(event) {
+            const data = event && event.data;
+            if (!data || typeof data !== 'object') return false;
+            if (annotationEditorWindow && event.source && event.source !== annotationEditorWindow) return false;
+            if (data.type === 'spine-editor-ready') {
+                if (!pendingEditorPayload) return false;
+                (event.source || annotationEditorWindow).postMessage(pendingEditorPayload, '*');
+                setStatusMessage(`已送到標註工具：${pendingEditorPayload.sourceImagePath}`);
+                pendingEditorPayload = null;
+                return true;
+            }
+            if (data.type === 'spine-editor-exported') return applyCorrectedAnnotation(data);
+            return false;
+        }
+
+        function sameImage(a, b) {
+            const stem = value => String(value || '').replace(/\\/g, '/').split('/').pop().replace(/\.[^.]+$/, '').toLowerCase();
+            return !!a && !!b && stem(a) === stem(b);
+        }
+
+        function applyCorrectedAnnotation(data) {
+            if (!sameImage(data.sourceImagePath, currentSource.imagePath)) {
+                setStatusMessage(`收到 ${data.filename || '修正版'}，但目前顯示的是其他影像，未套用。`);
+                return false;
+            }
+            try {
+                annotationData = normalizeAnnotation(JSON.parse(data.jsonText));
+            } catch (error) {
+                alert('修正版 JSON 解析失敗：' + error.message);
+                return false;
+            }
+            annotationData._fileName = data.savedToOriginal
+                ? `${data.savedPath || data.filename}（已由標註工具存回原檔）`
+                : `${data.filename || '修正版'}（標註工具修正版，尚未覆蓋原檔）`;
+            annotationData._correctedFromEditor = true;
+            updateScaleFactors();
+            updateStatus();
+            renderSidebar();
+            redraw();
+            setStatusMessage(data.savedToOriginal
+                ? `已顯示修正版，並已存回原檔 ${data.savedPath || data.sourceJsonPath}（批次審查的這一筆需重新確認）。`
+                : `已顯示修正版。請用下載的 ${data.filename || 'JSON'} 覆蓋 ${data.sourceJsonPath || '原檔'}。`);
+            return true;
+        }
+
+        function setStatusMessage(message) {
+            const el = document.getElementById('statusText');
+            if (el) el.textContent = message;
+        }
+
         function exitBatchReviewMode() {
             batchReviewMode = false;
             batchReviewController.beginLoad();
@@ -1138,6 +1257,7 @@
             else if (key === 'k' || event.key === 'ArrowLeft') batchPrevious();
             else if (key === 's') skipBatchPair();
             else if (key === 'i') toggleBatchImplant();
+            else if (key === 'e') sendToAnnotationEditor();
             else return;
             event.preventDefault();
         }
@@ -1208,7 +1328,8 @@
         }
 
         function loadImageFile(file) {
-            const name = file.name.toLowerCase();
+            setCurrentSource({ imageFile: file, imagePath: file.name || null });
+            const name = (file.name || '').toLowerCase();
 
             if (name.endsWith('.dcm')) {
                 // DICOM: 用 ArrayBuffer 手動解碼
@@ -1277,6 +1398,7 @@
         }
 
         function loadJsonFile(file) {
+            setCurrentSource({ jsonFile: file, jsonPath: file.name || null });
             const reader = new FileReader();
             reader.onload = e => {
                 try {

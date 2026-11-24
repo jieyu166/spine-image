@@ -309,6 +309,22 @@ def apply_case_flags_manifest(entries: list[dict], manifest: dict[str, dict]) ->
     return summary
 
 
+HOLDOUT_GROUP_REGEX = re.compile(r'(?:^|/)(\d{8}|[CL]\d{5})[^/]*$')
+
+
+def drop_holdout_patients(entries: list[dict], holdout_groups: dict[str, str]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """剔除外部測試集（manifests/holdout_*.json）病人群的影像；回傳 (保留, [(image_path, 清單名稱)])。"""
+    kept, dropped = [], []
+    for entry in entries:
+        match = HOLDOUT_GROUP_REGEX.search(str(entry.get('image_path', '')).replace('\\', '/'))
+        group = match.group(1) if match else None
+        if group and group in holdout_groups:
+            dropped.append((entry.get('image_path', ''), holdout_groups[group]))
+        else:
+            kept.append(entry)
+    return kept, dropped
+
+
 def filter_entries_by_flags(entries: list[dict], exclude_implant: bool = False) -> tuple[list[dict], dict]:
     """依病例旗標篩選；回傳 (保留的 entries, 統計)。"""
     kept: list[dict] = []
@@ -406,6 +422,12 @@ def main():
     elif args.case_flags:
         print(f"ERROR: --case-flags {args.case_flags} 不存在")
         return 1
+    from build_holdout_manifest import load_holdout_groups
+    entries, dropped = drop_holdout_patients(entries, load_holdout_groups())
+    if dropped:
+        print(f"WARNING: 剔除 {len(dropped)} 張外部測試集病人的影像（不得進入訓練）：")
+        for image_path, name in dropped:
+            print(f"  - {image_path}（{name}）")
     entries, flag_summary = filter_entries_by_flags(entries, exclude_implant=args.exclude_implant)
     print(
         f"病例旗標: 植入物 {flag_summary['implant']} / 提前結束(GT 截斷) {flag_summary['incomplete']}"
