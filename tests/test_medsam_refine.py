@@ -354,3 +354,66 @@ def test_segmenter_uses_normalize_from_decoder_meta(monkeypatch):
     monkeypatch.setattr(mr, 'load_medsam', lambda path=None: M())
     seg = ms.Segmenter(None).load()
     assert seg.normalize == 'minmax'
+
+
+# ── 512 輸入（瀏覽器版） ───────────────────────────────────────────────
+@pytest.fixture
+def side512():
+    mr.set_input_side(512)
+    yield
+    mr.set_input_side(1024)
+
+
+def test_set_input_side_validates_and_sets_lowres():
+    try:
+        assert mr.set_input_side(512) == 512 and mr.LOWRES == 128
+        with pytest.raises(ValueError):
+            mr.set_input_side(500)
+    finally:
+        mr.set_input_side(1024)
+    assert (mr.SIDE, mr.LOWRES) == (1024, 256)
+
+
+def test_make_training_item_at_512(tmp_path, side512):
+    img = np.zeros((1200, 1000), np.uint8)
+    pts = _vertebra()
+    cv2.fillPoly(img, [mr.outline_polygon(pts).astype(np.int32)], 200)
+    path = tmp_path / 'x.png'
+    cv2.imwrite(str(path), img)
+    x, box, target = mr.make_training_item({'image': path, 'points': pts, 'size': mr.vertebra_size(pts)},
+                                           mr.ImageCache(), np.random.default_rng(3), 'imagenet')
+    assert x.shape == (3, 512, 512) and target.shape == (128, 128)
+    assert 0.05 < target.mean() < 0.4
+    assert box.max() < 512 + 200
+
+
+def test_segment_vertebra_round_trip_at_512(side512):
+    class Sam512(_FakeSam):
+        def __call__(self, image_embeddings, input_boxes, multimask_output=False):
+            import torch
+            from types import SimpleNamespace
+            b = input_boxes[:, 0]
+            c = (torch.arange(128).float() + 0.5) * 4 - 0.5
+            inside = ((c[None, None, :] >= b[:, 0, None, None]) & (c[None, None, :] <= b[:, 2, None, None]) &
+                      (c[None, :, None] >= b[:, 1, None, None]) & (c[None, :, None] <= b[:, 3, None, None]))
+            return SimpleNamespace(pred_masks=torch.where(inside, 10.0, -10.0)[:, None, None],
+                                   iou_scores=torch.full((b.shape[0], 1, 1), 0.9))
+
+    image = np.zeros((3000, 2500), np.uint8)
+    box = np.array([1000.0, 1500.0, 1360.0, 1760.0])
+    pts, _, _ = mr.segment_vertebra(Sam512(), image, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), 2.2 * 360, box)
+    expect = {'anteriorSuperior': (1000, 1500), 'posteriorInferior': (1360, 1760)}
+    for k, (x, y) in expect.items():
+        assert _err((x, y), pts[k]) < 8.0, (k, pts[k])
+
+
+@pytest.mark.skipif(not (mr.MEDSAM_DIR / 'config.json').exists(), reason='沒有 MedSAM 權重')
+def test_resized_sam_produces_half_size_embeddings():
+    import torch
+
+    model = mr.resized_sam(512).eval()
+    with torch.no_grad():
+        out = model.get_image_embeddings(torch.zeros(1, 3, 512, 512))
+    emb = out if torch.is_tensor(out) else out[0]
+    assert tuple(emb.shape) == (1, 256, 32, 32)
+    assert model.config.prompt_encoder_config.image_embedding_size == 32

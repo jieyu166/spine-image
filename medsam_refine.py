@@ -23,6 +23,9 @@
 
 產物（--out-dir）：fold{k}_decoder.pth、train_log.json、<版本>/oof_eval/oof_predictions.json、summary.md。
 --train-final 另外用全部標註訓練 medsam_decoder_all.pth，供 medsam_server.py／標註工具使用。
+--side 512：encoder 輸入改成 512²（位置編碼由 1024 內插，encoder 仍凍結），瀏覽器內推論約快 5 倍；
+            一節椎體在原圖約 300 px、裁切約 660 px，512 幾乎不損失原圖解析度。decoder 權重的 meta 記錄 side，
+            載入時自動切換。
 
 用法：
   python medsam_refine.py --stage1-run endplate_training_data/runs/learning_curve_20261013/frac_100 \\
@@ -47,13 +50,23 @@ from refine_stage2 import (CONTEXT, CORNERS, POINTS, ImageCache, apply_affine, c
 
 ROOT = Path(__file__).resolve().parent
 MEDSAM_DIR = Path(os.environ.get('MEDSAM_DIR', r'C:\Users\jai16\.cache\medsam-vit-base'))
-SIDE = 1024          # MedSAM 輸入邊長
-LOWRES = 256         # mask decoder 輸出邊長
+SIDE = 1024          # MedSAM 輸入邊長（set_input_side 可改成 512）
+LOWRES = 256         # mask decoder 輸出邊長 = SIDE / 4
 BOX_MARGIN = 0.04    # 提示框外擴（× 椎體大小）
 # 訓練時的模擬誤差：整框平移 σ（× 大小）、四邊各自 σ、上限
 TRAIN_SHIFT_SIGMA, TRAIN_SIDE_SIGMA, TRAIN_CLIP = 0.15, 0.07, 0.4
 SUPERIOR = ('anteriorSuperior', 'middleSuperior', 'posteriorSuperior')
 INFERIOR = ('anteriorInferior', 'middleInferior', 'posteriorInferior')
+
+
+def set_input_side(side):
+    """設定 MedSAM 輸入邊長（1024 = 原生；512 = 瀏覽器版）。影響裁切、訓練目標與推論的所有函式。"""
+    global SIDE, LOWRES
+    side = int(side)
+    if side < 256 or side > 1024 or side % 64:
+        raise ValueError(f'side 必須是 256–1024 之間 64 的倍數：{side}')
+    SIDE, LOWRES = side, side // 4
+    return SIDE
 
 
 # ── 幾何（純函式，有測試） ─────────────────────────────────────────────
@@ -223,15 +236,45 @@ def load_medsam(decoder_path=None, device=None):
     from transformers import SamModel
 
     device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = SamModel.from_pretrained(str(MEDSAM_DIR))
-    model.medsam_meta = {}
-    if decoder_path:
-        state = torch.load(decoder_path, map_location='cpu')
+    state = torch.load(decoder_path, map_location='cpu') if decoder_path else None
+    meta = dict(state.get('meta') or {}) if state else {}
+    if state:
+        set_input_side(meta.get('side', 1024))   # 舊權重沒有記錄 side，都是 1024
+    model = SamModel.from_pretrained(str(MEDSAM_DIR)) if SIDE == 1024 else resized_sam(SIDE)
+    model.medsam_meta = meta
+    if state:
         model.mask_decoder.load_state_dict(state['mask_decoder'])
-        model.medsam_meta = dict(state.get('meta') or {})
     for name, p in model.named_parameters():
         p.requires_grad = name.startswith('mask_decoder.')
     return model.to(device).eval()
+
+
+def resized_sam(side):
+    """輸入 side² 的 MedSAM：絕對位置編碼（64×64）與全域注意力的相對位置編碼由 1024 版內插。"""
+    import torch.nn.functional as F
+    from transformers import SamConfig, SamModel
+
+    src = SamModel.from_pretrained(str(MEDSAM_DIR))
+    cfg = SamConfig.from_pretrained(str(MEDSAM_DIR))
+    grid = side // cfg.vision_config.patch_size
+    cfg.vision_config.image_size = side
+    cfg.prompt_encoder_config.image_size = side
+    cfg.prompt_encoder_config.image_embedding_size = grid
+    model = SamModel(cfg)
+    target = model.state_dict()
+    state = {}
+    for k, v in src.state_dict().items():
+        if v.shape != target[k].shape:
+            if k.endswith('pos_embed'):          # (1, 64, 64, C) → (1, g, g, C)
+                v = F.interpolate(v.permute(0, 3, 1, 2), size=(grid, grid), mode='bicubic',
+                                  align_corners=False).permute(0, 2, 3, 1)
+            elif 'rel_pos' in k:                  # (2·64−1, C) → (2g−1, C)
+                v = F.interpolate(v.T[None], size=target[k].shape[0], mode='linear', align_corners=False)[0].T
+            else:
+                raise ValueError(f'未預期的形狀差異：{k} {tuple(v.shape)} → {tuple(target[k].shape)}')
+        state[k] = v.contiguous()
+    model.load_state_dict(state)
+    return model
 
 
 def encode(model, batch):
@@ -430,12 +473,14 @@ def main(argv=None):
     parser.add_argument('--folds', type=int, nargs='*', help='只跑指定 fold（除錯用）')
     parser.add_argument('--min-iou', type=float, default=0.8, help='medsam_ft_gated：預測 IoU 低於此值保留第一階段')
     parser.add_argument('--normalize', choices=('imagenet', 'minmax'), default='imagenet')
+    parser.add_argument('--side', type=int, default=1024, help='encoder 輸入邊長（512 = 瀏覽器版）')
     parser.add_argument('--reuse-models', action='store_true', help='載入 out-dir 既有的 fold*_decoder.pth，只重跑推論')
     parser.add_argument('--skip-zeroshot', action='store_true')
     parser.add_argument('--train-final', action='store_true', help='另用全部標註訓練 medsam_decoder_all.pth（標註工具用）')
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
+    set_input_side(args.side)
     args.out_dir = args.out_dir.resolve()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.out_dir / 'refine.log'
@@ -459,7 +504,8 @@ def main(argv=None):
         raise SystemExit('fold 與第一階段 run 記錄不一致，停止以免資料洩漏')
     stage1 = json.loads((args.stage1_run / 'oof_eval' / 'oof_predictions.json').read_text(encoding='utf-8'))['cases']
     by_index = {c['annotation_index']: c for c in stage1}
-    log(f"{len(annotations)} 張、{len(folds)} 折；第一階段：{args.stage1_run}；MedSAM：{MEDSAM_DIR}；normalize={args.normalize}")
+    log(f"{len(annotations)} 張、{len(folds)} 折；第一階段：{args.stage1_run}；MedSAM：{MEDSAM_DIR}；normalize={args.normalize}；"
+        f"輸入 {SIDE}²")
 
     names = ['medsam_ft', 'medsam_ft_gated', 'medsam_drawn_box'] + ([] if args.skip_zeroshot else ['medsam_zeroshot'])
     variants = {n: [] for n in names}
@@ -472,10 +518,12 @@ def main(argv=None):
         path = args.out_dir / f'fold{k}_decoder.pth'
         if args.reuse_models:
             model = load_medsam(path)
+            if SIDE != args.side:   # 舊權重沒有記錄 side＝1024；不能和 --side 混用
+                raise SystemExit(f'{path.name} 是 {SIDE}² 的 decoder，與 --side {args.side} 不符')
             log(f"  載入 {path.name}（只重跑推論）")
         else:
             model, history = train_decoder([annotations[i] for i in train_idx], args, log, f'fold {k}')
-            save_decoder(model, path, {'fold': k, 'epochs': args.epochs, 'normalize': args.normalize})
+            save_decoder(model, path, {'fold': k, 'epochs': args.epochs, 'normalize': args.normalize, 'side': SIDE})
             train_log[k] = history
         rng = np.random.default_rng(args.seed + k)
         cache = ImageCache()
@@ -537,7 +585,8 @@ def main(argv=None):
         log('=== 用全部標註訓練標註工具用的 decoder ===')
         model, history = train_decoder(annotations, args, log, 'final')
         save_decoder(model, args.out_dir / 'medsam_decoder_all.pth',
-                     {'fold': 'all', 'epochs': args.epochs, 'normalize': args.normalize, 'n_images': len(annotations)})
+                     {'fold': 'all', 'epochs': args.epochs, 'normalize': args.normalize, 'n_images': len(annotations),
+                      'side': SIDE})
         log(f"  寫入 {args.out_dir / 'medsam_decoder_all.pth'}")
     return 0
 

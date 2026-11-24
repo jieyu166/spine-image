@@ -225,6 +225,21 @@ pip install albumentations==1.3.1   # 1.4+ 在 Python 3.14 有安裝問題
 #    MedSAM 權重：Hugging Face wanglab/medsam-vit-base（Apache-2.0），預設放 C:\Users\jai16\.cache\medsam-vit-base，
 #    可用環境變數 MEDSAM_DIR 改位置；微調後的 decoder 由 medsam_refine.py --train-final 產生。
 python medsam_server.py   # http://127.0.0.1:8003
+# 1d. 醫院電腦不能跑 Python：瀏覽器內推論（onnxruntime-web，WebGPU）。影像不離開該電腦，也不上傳。
+#    先在家裡匯出模型（512 輸入版，醫院 Intel 內顯每節約 1.3 秒；1024 版約 6 秒）：
+python medsam_refine.py --stage1-run endplate_training_data/runs/learning_curve_20261013/frac_100 --annotations-dir endplate_training_data/runs/sixpoint_reviewed_20260922b_cv5/annotations --out-dir endplate_training_data/runs/medsam_refine_<日期>_s512 --epochs 20 --side 512 --skip-zeroshot --train-final
+python export_medsam_onnx.py --decoder endplate_training_data/runs/medsam_refine_<日期>_s512/medsam_decoder_all.pth --out endplate_training_data/onnx/medsam_<日期>_s512 --skip-int8
+#    把該資料夾的 meta.json、decoder.onnx、encoder_fp16.onnx、holdout_hashes.json 與 spinal-annotation-web.html 帶到醫院電腦，
+#    用 Chrome 直接打開 HTML，按「📦 瀏覽器模型」選這 4 個檔（Ctrl+A），之後「🧠 MedSAM 框選」「🧠 修整全部」都在瀏覽器裡算。
+#    模型會暫存在該電腦瀏覽器（IndexedDB），下次開啟不用重選。需要能連 cdn.jsdelivr.net 載入 onnxruntime-web。
+#    holdout_hashes.json 是外部測試集的檔案雜湊與像素指紋（只有雜湊）；缺少這個檔就不啟用，外部測試集影像一律拒絕。
+#    匯出時外部測試集清單必須完整（每張都讀得到、是不透明 8-bit PNG），否則停止匯出；meta.json 記錄清單的筆數與 SHA-256，
+#    瀏覽器載入時核對，不一致就不啟用。找不到 --decoder 會停止（要匯出未微調版請加 --allow-zeroshot）。
+#    一致性檢查影像預設自動挑 Images/ 裡第一張不在外部測試集的影像，也可用 --check-image／--check-json 指定。
+#    測速：medsam_onnx_bench.html 直接打開、選 encoder 與 decoder，量那台電腦每節幾秒（輸入是隨機數字，不用影像）。
+#    驗證：node --test tests/medsam_core.test.js（JS 移植 vs Python 標準答案，python tests/make_medsam_core_fixtures.py 產生）
+#          node tests/chrome_medsam_browser_smoke.mjs <chrome.exe> <onnx 資料夾> <png> <json> <參考答案.json> <暫存資料夾> [holdout.png]
+#          （參考答案：python tests/medsam_reference_points.py <png> <json> <decoder.pth> <參考答案.json>）
 
 # 2. 重生 train/val split（從 Images/ 掃描配對）
 python regenerate_splits.py --group-regex '(?:^|/)(\d{8}|[CL]\d{5})[^/]*$'
@@ -330,6 +345,8 @@ Spine/
 ├── 標註工具
 │   ├── spinal-annotation-web.html   # 椎體 4 角點 + 上下 middle point 標註工具（含 MedSAM 框選輔助）
 │   ├── medsam_server.py             # MedSAM 框選輔助本機服務 (127.0.0.1:8003)
+│   ├── export_medsam_onnx.py        # MedSAM → ONNX（瀏覽器內推論用）
+│   ├── medsam_onnx_bench.html       # 瀏覽器 MedSAM 測速頁（可帶到醫院電腦）
 │   └── pkl-contour-editor.html      # 外部 mask → 終板輪廓點編輯器
 │
 ├── 部署

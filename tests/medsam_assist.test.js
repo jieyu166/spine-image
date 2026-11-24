@@ -284,3 +284,169 @@ test('有原始檔案時上傳原始位元組，不用 canvas 重新編碼', asy
   assert.equal(await form.get('file').text(), 'original-png-bytes');
   assert.equal(form.get('sha256'), 'd'.repeat(64));
 });
+
+// ── 瀏覽器內推論（不需要 Python）────────────────────────────────────────
+// 假 ort：遮罩 = 提示框，用來檢查標註工具的瀏覽器分支（真正的模型在 Chrome 端對端測試）
+function fakeBrowserModel(page, { holdoutFiles = {}, holdoutPixels = {} } = {}) {
+  const runs = [];
+  page.context.__fakeModel = {
+    holdoutFiles, holdoutPixels, runs,
+    make(ctxTensor) {
+      const S = 512, L = 128;
+      return {
+        ort: { Tensor: ctxTensor }, side: S, context: 2.2, boxMargin: 0.04, normalize: 'imagenet', device: 'fake',
+        holdoutFiles, holdoutPixels,
+        encoder: { run: async () => ({ image_embeddings: new ctxTensor('float32', new Float32Array(1), [1]) }) },
+        decoder: { run: async ({ input_boxes }) => {
+          const b = Array.from(input_boxes.data);
+          runs.push(b);
+          const logits = new Float32Array(L * L);
+          for (let y = 0; y < L; y++) for (let x = 0; x < L; x++) {
+            const cx = (x + 0.5) * 4 - 0.5, cy = (y + 0.5) * 4 - 0.5;
+            logits[y * L + x] = (cx >= b[0] && cx <= b[2] && cy >= b[1] && cy <= b[3]) ? 10 : -10;
+          }
+          return { low_res_masks: { data: logits }, iou_scores: { data: Float32Array.of(0.88) } };
+        } },
+      };
+    },
+  };
+  page.evaluate(`medsamWeb = __fakeModel.make(class { constructor(t, d, s) { this.type = t; this.data = d; this.dims = s; } })`);
+  return runs;
+}
+
+test('瀏覽器模式：不呼叫服務，拉框產生 S1、L5 並記錄 assist', async () => {
+  const server = fakeServer();
+  const page = await openPage(server);
+  const runs = fakeBrowserModel(page);
+  assert.equal(await page.evaluate('toggleMedsamMode(true)'), true);
+  assert.equal(page.evaluate('medsamBackend'), 'browser');
+  assert.match(page.document.getElementById('medsamStatus').textContent, /瀏覽器模式/);
+  assert.equal(await page.evaluate('medsamApplyBox([400, 1500, 600, 1700])'), true);
+  assert.equal(await page.evaluate('medsamApplyBox([380, 1200, 620, 1420])'), true);
+  const verts = JSON.parse(page.evaluate('JSON.stringify(vertebrae)'));
+  assert.deepEqual(verts.map(v => v.name), ['S1', 'L5']);
+  assert.equal(verts[0].points.length, 3);
+  assert.equal(verts[1].points.length, 6);
+  // 角點回到框角（遮罩 = 框）：L5 前上角 ≈ (380, 1200)
+  assert.ok(Math.hypot(verts[1].points[0].x - 380, verts[1].points[0].y - 1200) < 8, JSON.stringify(verts[1].points[0]));
+  assert.equal(verts[1].assist.method, 'MedSAM');
+  assert.equal(runs.length, 2);
+  assert.equal(server.calls.filter(c => c.route !== '/health').length, 0, '瀏覽器模式不能上傳影像到服務');
+});
+
+test('瀏覽器模式：外部測試集依檔案雜湊拒絕', async () => {
+  const page = await openPage(fakeServer());
+  fakeBrowserModel(page, { holdoutFiles: { ['c'.repeat(64)]: 'holdout_t' } });
+  await page.evaluate('toggleMedsamMode(true)');
+  assert.equal(await page.evaluate('medsamApplyBox([400, 1500, 600, 1700])'), false);
+  assert.equal(page.evaluate('vertebrae.length'), 0);
+  assert.match(page.alerts.at(-1), /外部測試集（holdout_t）/);
+});
+
+test('瀏覽器模式：外部測試集依像素指紋拒絕（沒有原始檔雜湊時）', async () => {
+  const page = await openPage(fakeServer());
+  page.evaluate(`commitLoadedImage({width:40,height:30,naturalWidth:40,naturalHeight:30},{name:'pasted.png'},null)`);
+  // harness 的 getImageData 全為 0：指紋 = SHA-256("30x40:" + 1200 個 0)
+  const { createHash } = require('node:crypto');
+  const fp = createHash('sha256').update(Buffer.concat([Buffer.from('30x40:'), Buffer.alloc(1200)])).digest('hex');
+  fakeBrowserModel(page, { holdoutPixels: { [fp]: 'holdout_p' } });
+  await page.evaluate('toggleMedsamMode(true)');
+  assert.equal(await page.evaluate('medsamApplyBox([5, 5, 30, 25])'), false);
+  assert.match(page.alerts.at(-1), /外部測試集（holdout_p）/);
+});
+
+test('瀏覽器模型資料夾缺少外部測試集清單：不啟用', async () => {
+  const page = await openPage(fakeServer({ health: false }));
+  const file = (name, text) => ({ name, text: async () => text, arrayBuffer: async () => new ArrayBuffer(4) });
+  page.context.__files = [file('meta.json', '{"preprocess":{"side":512,"context":2.2,"box_margin":0.04}}'),
+                          file('decoder.onnx', ''), file('encoder_fp16.onnx', ''), file('encoder.onnx', '')];
+  assert.equal(await page.evaluate('medsamLoadBrowserModel(__files)'), false);
+  assert.match(page.alerts.at(-1), /holdout_hashes\.json/);
+  assert.equal(page.evaluate('medsamWeb'), null);
+});
+
+test('瀏覽器模式：修整全部不檢查本機服務，直接用瀏覽器模型', async () => {
+  const server = fakeServer({ health: false });
+  const page = await openPage(server);
+  const runs = fakeBrowserModel(page);
+  page.context.__data = { version: '2.3', spineType: 'L', imageInfo: { filename: 'case.png', width: 1000, height: 2000 },
+    vertebrae: [{ name: 'L4', points: vertebraPoints(500, 1100) }, { name: 'L5', points: vertebraPoints(510, 1400) }] };
+  page.evaluate(`importAnnotationJson(__data, { jsonFilename: 'case.json', silent: true })`);
+  assert.equal(await page.evaluate('medsamRefineAll()'), 2);
+  assert.equal(runs.length, 2);
+  assert.equal(page.evaluate('medsamBackend'), 'browser');
+  assert.ok(!page.alerts.some(a => /還沒準備好/.test(a)), page.alerts.join(' | '));
+});
+
+// ── 瀏覽器模型載入的防護（審查後補強）────────────────────────────────────
+function modelFolder({ holdout, metaHoldout, encoderBytes = 'enc', recordedEncoder = 'enc' }) {
+  const { createHash } = require('node:crypto');
+  const sha = s => createHash('sha256').update(Buffer.from(s)).digest('hex');
+  const holdText = JSON.stringify(holdout);
+  const meta = {
+    normalize: 'imagenet', preprocess: { side: 512, context: 2.2, box_margin: 0.04 },
+    holdout: metaHoldout || { files: Object.keys(holdout.files).length, pixels: Object.keys(holdout.pixels).length,
+                              sha256: sha(holdText), created: '2026-11-24T00:00:00' },
+    files: { encoder_fp16: { name: 'encoder_fp16.onnx', sha256: sha(recordedEncoder) }, decoder: { name: 'decoder.onnx', sha256: sha('dec') } },
+  };
+  const file = (name, text) => ({ name, text: async () => text, arrayBuffer: async () => new Uint8Array(Buffer.from(text)).buffer });
+  return [file('meta.json', JSON.stringify(meta)), file('holdout_hashes.json', holdText),
+          file('encoder_fp16.onnx', encoderBytes), file('decoder.onnx', 'dec')];
+}
+
+function fakeOrt(page, { failWebgpu = false } = {}) {
+  const created = [];
+  page.context.navigator.gpu = { requestAdapter: async () => ({}) };
+  page.context.ort = {
+    env: { wasm: {}, webgpu: {} },
+    Tensor: class { constructor(t, d, s) { this.type = t; this.data = d; this.dims = s; } },
+    InferenceSession: { create: async (_bytes, opts) => {
+      const ep = opts.executionProviders[0];
+      if (failWebgpu && ep === 'webgpu') throw new Error('shader-f16 not supported');
+      const s = { ep, released: false, run: async () => ({}), release: async () => { s.released = true; } };
+      created.push(s);
+      return s;
+    } },
+  };
+  return created;
+}
+
+const HOLD = { created: '2026-11-24T00:00:00', files: { ['a'.repeat(64)]: 'holdout_t' }, pixels: { ['b'.repeat(64)]: 'holdout_t' } };
+
+test('瀏覽器模型：清單、meta 與模型檔一致才載入，顯示外部測試集筆數', async () => {
+  const page = await openPage(fakeServer({ health: false }));
+  const created = fakeOrt(page);
+  page.context.__files = modelFolder({ holdout: HOLD });
+  assert.equal(await page.evaluate('medsamLoadBrowserModel(__files)'), true, page.alerts.join(' | '));
+  assert.equal(page.evaluate('medsamBackend'), 'browser');
+  assert.match(page.evaluate('medsamWeb.device'), /WebGPU.*外部測試集 1 張（清單 2026-11-24）/);
+  assert.deepEqual(created.map(s => s.ep), ['webgpu', 'webgpu']);
+  // 再載入一次：舊的 session 要先釋放
+  page.context.__files = modelFolder({ holdout: HOLD });
+  assert.equal(await page.evaluate('medsamLoadBrowserModel(__files)'), true);
+  assert.equal(created.slice(0, 2).every(s => s.released), true);
+});
+
+test('瀏覽器模型：WebGPU 建立失敗時改用 CPU', async () => {
+  const page = await openPage(fakeServer({ health: false }));
+  const created = fakeOrt(page, { failWebgpu: true });
+  page.context.__files = modelFolder({ holdout: HOLD });
+  assert.equal(await page.evaluate('medsamLoadBrowserModel(__files)'), true, page.alerts.join(' | '));
+  assert.match(page.evaluate('medsamWeb.device'), /CPU/);
+  assert.deepEqual(created.map(s => s.ep), ['wasm', 'wasm']);
+});
+
+for (const [label, opts, pattern] of [
+  ['外部測試集清單是空的', { holdout: { created: 'x', files: {}, pixels: {} } }, /空的/],
+  ['清單和 meta.json 不是同一次匯出', { holdout: HOLD, metaHoldout: { files: 1, pixels: 1, sha256: '0'.repeat(64) } }, /不是同一次匯出/],
+  ['encoder 不是 meta.json 記錄的那一個', { holdout: HOLD, encoderBytes: 'old-encoder' }, /encoder_fp16\.onnx 與 meta\.json 記錄的不同/],
+]) {
+  test(`瀏覽器模型：${label}就不啟用`, async () => {
+    const page = await openPage(fakeServer({ health: false }));
+    fakeOrt(page);
+    page.context.__files = modelFolder(opts);
+    assert.equal(await page.evaluate('medsamLoadBrowserModel(__files)'), false);
+    assert.match(page.alerts.at(-1), pattern);
+    assert.equal(page.evaluate('medsamWeb'), null);
+  });
+}

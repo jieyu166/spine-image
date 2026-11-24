@@ -419,6 +419,8 @@
                     <div class="toolbar-group">
                         <button class="btn-info" id="btnMedsam" onclick="toggleMedsamMode()" title="開啟後在椎體上拉框，自動產生該節的點（需先執行 python medsam_server.py）。先點選某一節再拉框＝修正該節。快捷鍵 M">🧠 MedSAM 框選 (M)</button>
                         <button class="btn-secondary" id="btnMedsamAll" onclick="medsamRefineAll()" title="以每節現有點位的外接框當提示，用 MedSAM 重新求出所有完整椎體的 6 點" style="font-size:13px;">🧠 修整全部</button>
+                        <button class="btn-secondary" id="btnMedsamModel" onclick="document.getElementById('medsamModelInput').click()" title="打開 MedSAM ONNX 模型資料夾，Ctrl+A 全選裡面的檔案（meta.json、decoder.onnx、encoder_fp16.onnx、holdout_hashes.json）。在瀏覽器內推論，影像不會上傳，也不需要 Python" style="font-size:13px;">📦 瀏覽器模型</button>
+                        <input type="file" id="medsamModelInput" multiple accept=".onnx,.json" style="display:none" onchange="medsamLoadBrowserModel(this.files).finally(() => { this.value = ''; })">
                         <span id="medsamStatus" style="font-size:12px; color:#bbb;"></span>
                     </div>
                 </div>
@@ -516,6 +518,337 @@
     <input type="file" id="jsonInput" accept=".json" style="display: none;" onchange="handleJsonImport(event)">
     <input type="file" id="spinefmInput" accept=".json,image/*" multiple style="display: none;" onchange="handleSpineFMSelect(event)">
 
+    <script id="medsam-core">
+    // ==================== MedSAM 瀏覽器推論核心（純函式） ====================
+    // 與 medsam_refine.py 的 segment_vertebra 相同流程：裁切 → encoder → decoder → 遮罩 → 6 點。
+    // 對照測試：tests/medsam_core.test.js（與 Python 產生的 tests/fixtures/medsam_core_cases.json 比對）。
+    const MedsamCore = (() => {
+        'use strict';
+        const POINTS = ['anteriorSuperior', 'middleSuperior', 'posteriorSuperior',
+                        'posteriorInferior', 'middleInferior', 'anteriorInferior'];
+        const SUPERIOR = ['anteriorSuperior', 'middleSuperior', 'posteriorSuperior'];
+        const INFERIOR = ['anteriorInferior', 'middleInferior', 'posteriorInferior'];
+        const MEAN = [0.485, 0.456, 0.406];
+        const STD = [0.229, 0.224, 0.225];
+        // 逆時針（y 向下的畫面座標）：右、右上、上、左上、左、左下、下、右下；與 OpenCV 輪廓追蹤相同
+        const DIRS = [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1]];
+
+        // ── 仿射（2×3，列優先 [a, b, c, d, e, f]） ──
+        function cropMatrix(cx, cy, side, crop) {
+            const s = crop / side;
+            return [s, 0, crop / 2 - s * cx, 0, s, crop / 2 - s * cy];
+        }
+        function applyAffine(m, x, y) {
+            return [m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5]];
+        }
+        function invertAffine(m) {
+            const det = m[0] * m[4] - m[1] * m[3];
+            const a = m[4] / det, b = -m[1] / det, d = -m[3] / det, e = m[0] / det;
+            return [a, b, -(a * m[2] + b * m[5]), d, e, -(d * m[2] + e * m[5])];
+        }
+
+        // 提示框 → 裁切中心與椎體大小（訓練時框 = 點位外接框 + 每邊 margin × 大小）
+        function boxGeometry(box, margin) {
+            const [x0, y0, x1, y1] = box.map(Number);
+            if (!(x1 > x0 && y1 > y0)) throw new Error('框的寬高必須大於 0');
+            return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, size: Math.max(x1 - x0, y1 - y0) / (1 + 2 * margin) };
+        }
+
+        // RGBA → 灰階（OpenCV IMREAD_GRAYSCALE 的權重；X 光 R=G=B 時就是 R）
+        function rgbaToGray(rgba, n) {
+            const g = new Uint8Array(n);
+            for (let i = 0, j = 0; i < n; i++, j += 4) {
+                g[i] = Math.min(255, Math.round(0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2]));
+            }
+            return g;
+        }
+
+        // cv2.warpAffine（INTER_LINEAR、邊界補 0）：dst(x, y) = src(M⁻¹ (x, y))。
+        // 模擬 OpenCV 的定點運算：座標量化到 1/32 px（INTER_BITS = 5），權重 × 2¹⁵ 取整數
+        const WARP_TAB = (() => {
+            const tab = [];
+            for (let iy = 0; iy < 32; iy++) {
+                for (let ix = 0; ix < 32; ix++) {
+                    const fx = ix / 32, fy = iy / 32;
+                    const f = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy];
+                    const w = f.map(v => Math.round(v * 32768));
+                    const diff = 32768 - w.reduce((s, v) => s + v, 0);   // OpenCV 把誤差補到最大的係數
+                    if (diff) { let k = 0; for (let j = 1; j < 4; j++) if (w[j] > w[k]) k = j; w[k] += diff; }
+                    tab.push(w);
+                }
+            }
+            return tab;
+        })();
+        function warpGray(gray, w, h, m, S) {
+            const inv = invertAffine(m);
+            const out = new Uint8Array(S * S);
+            const at = (x, y) => (x >= 0 && y >= 0 && x < w && y < h) ? gray[y * w + x] : 0;
+            for (let y = 0; y < S; y++) {
+                for (let x = 0; x < S; x++) {
+                    const X = Math.round((inv[0] * x + inv[1] * y + inv[2]) * 32);
+                    const Y = Math.round((inv[3] * x + inv[4] * y + inv[5]) * 32);
+                    const x0 = X >> 5, y0 = Y >> 5;
+                    const c = WARP_TAB[(Y & 31) * 32 + (X & 31)];
+                    const v = c[0] * at(x0, y0) + c[1] * at(x0 + 1, y0) + c[2] * at(x0, y0 + 1) + c[3] * at(x0 + 1, y0 + 1);
+                    out[y * S + x] = Math.min(255, Math.max(0, (v + 16384) >> 15));
+                }
+            }
+            return out;
+        }
+
+        // 灰階 uint8 → (3, S, S) float32；imagenet = HF processor 設定，minmax = MedSAM 原始程式
+        function preprocess(patch, S, normalize = 'imagenet') {
+            const n = S * S;
+            const out = new Float32Array(3 * n);
+            if (normalize === 'minmax') {
+                let lo = 255, hi = 0;
+                for (let i = 0; i < n; i++) { if (patch[i] < lo) lo = patch[i]; if (patch[i] > hi) hi = patch[i]; }
+                const r = Math.max(hi - lo, 1e-6);
+                for (let i = 0; i < n; i++) { const v = (patch[i] - lo) / r; out[i] = v; out[n + i] = v; out[2 * n + i] = v; }
+                return out;
+            }
+            for (let c = 0; c < 3; c++) {
+                for (let i = 0; i < n; i++) out[c * n + i] = (patch[i] / 255 - MEAN[c]) / STD[c];
+            }
+            return out;
+        }
+
+        // torch.nn.functional.interpolate(bilinear, align_corners=False) 的 L→S 放大後取 > 0
+        function upsampleMask(logits, L, S) {
+            const idx0 = new Int32Array(S), idx1 = new Int32Array(S), wt = new Float32Array(S);
+            for (let i = 0; i < S; i++) {
+                const src = Math.max((i + 0.5) * L / S - 0.5, 0);
+                const i0 = Math.min(Math.floor(src), L - 1);
+                idx0[i] = i0; idx1[i] = Math.min(i0 + 1, L - 1); wt[i] = src - i0;
+            }
+            const mask = new Uint8Array(S * S);
+            for (let y = 0; y < S; y++) {
+                const r0 = idx0[y] * L, r1 = idx1[y] * L, fy = wt[y];
+                for (let x = 0; x < S; x++) {
+                    const c0 = idx0[x], c1 = idx1[x], fx = wt[x];
+                    const top = logits[r0 + c0] * (1 - fx) + logits[r0 + c1] * fx;
+                    const bot = logits[r1 + c0] * (1 - fx) + logits[r1 + c1] * fx;
+                    mask[y * S + x] = (top * (1 - fy) + bot * fy) > 0 ? 1 : 0;
+                }
+            }
+            return mask;
+        }
+
+        // 8 連通最大區塊；沒有前景回傳 null
+        function largestComponent(mask, W, H) {
+            const labels = new Int32Array(W * H);
+            const stack = new Int32Array(W * H);
+            let best = 0, bestArea = 0, label = 0;
+            for (let p = 0; p < W * H; p++) {
+                if (!mask[p] || labels[p]) continue;
+                label++;
+                let top = 0, area = 0;
+                stack[top++] = p; labels[p] = label;
+                while (top) {
+                    const q = stack[--top];
+                    area++;
+                    const qx = q % W, qy = (q - qx) / W;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        const ny = qy + dy;
+                        if (ny < 0 || ny >= H) continue;
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const nx = qx + dx;
+                            if (nx < 0 || nx >= W) continue;
+                            const r = ny * W + nx;
+                            if (mask[r] && !labels[r]) { labels[r] = label; stack[top++] = r; }
+                        }
+                    }
+                }
+                if (area > bestArea) { bestArea = area; best = label; }
+            }
+            if (!best) return null;
+            const comp = new Uint8Array(W * H);
+            for (let p = 0; p < W * H; p++) comp[p] = labels[p] === best ? 1 : 0;
+            return { comp, area: bestArea };
+        }
+
+        // 外輪廓（Suzuki & Abe 1985 外邊界追蹤，8 連通；= cv2.findContours RETR_EXTERNAL + CHAIN_APPROX_NONE）
+        function traceContour(comp, W, H) {
+            const on = (x, y) => x >= 0 && y >= 0 && x < W && y < H && comp[y * W + x] === 1;
+            let start = -1;
+            for (let p = 0; p < W * H; p++) if (comp[p]) { start = p; break; }
+            if (start < 0) return [];
+            const x0 = start % W, y0 = (start - x0) / W;
+            let first = -1;
+            for (let k = 0; k < 8; k++) {             // 從左鄰居開始順時針找
+                const d = (4 - k + 8) % 8;
+                if (on(x0 + DIRS[d][0], y0 + DIRS[d][1])) { first = d; break; }
+            }
+            if (first < 0) return [[x0, y0]];
+            const x1 = x0 + DIRS[first][0], y1 = y0 + DIRS[first][1];
+            const dirOf = (dx, dy) => DIRS.findIndex(d => d[0] === dx && d[1] === dy);
+            const out = [];
+            let px = x1, py = y1, cx = x0, cy = y0;   // (px, py) = 上一點；(cx, cy) = 目前點
+            for (let guard = 0; guard < 4 * W * H; guard++) {
+                const back = dirOf(px - cx, py - cy);
+                let nx = cx, ny = cy;
+                for (let k = 1; k <= 8; k++) {         // 從上一點的下一個方向開始逆時針找
+                    const d = (back + k) % 8;
+                    if (on(cx + DIRS[d][0], cy + DIRS[d][1])) { nx = cx + DIRS[d][0]; ny = cy + DIRS[d][1]; break; }
+                }
+                out.push([cx, cy]);
+                if (nx === x0 && ny === y0 && cx === x1 && cy === y1) break;
+                px = cx; py = cy; cx = nx; cy = ny;
+            }
+            return out;
+        }
+
+        function convexHull(points) {
+            const p = points.map(q => [q[0], q[1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            if (p.length < 3) return p;
+            const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+            const lower = [], upper = [];
+            for (const q of p) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
+            for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
+            return lower.slice(0, -1).concat(upper.slice(0, -1));
+        }
+
+        // 最小外接矩形的兩個邊方向（單位向量）；= cv2.minAreaRect 的邊
+        function minAreaRectEdges(points) {
+            const hull = convexHull(points);
+            if (hull.length < 3) return [[1, 0], [0, 1]];
+            let best = null, bestArea = Infinity;
+            for (let i = 0; i < hull.length; i++) {
+                const a = hull[i], b = hull[(i + 1) % hull.length];
+                const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+                if (len < 1e-9) continue;
+                const e = [(b[0] - a[0]) / len, (b[1] - a[1]) / len], n = [-e[1], e[0]];
+                let e0 = Infinity, e1 = -Infinity, n0 = Infinity, n1 = -Infinity;
+                for (const q of hull) {
+                    const pe = q[0] * e[0] + q[1] * e[1], pn = q[0] * n[0] + q[1] * n[1];
+                    if (pe < e0) e0 = pe; if (pe > e1) e1 = pe; if (pn < n0) n0 = pn; if (pn > n1) n1 = pn;
+                }
+                const area = (e1 - e0) * (n1 - n0);
+                if (area < bestArea - 1e-9) { bestArea = area; best = [e, n]; }
+            }
+            return best || [[1, 0], [0, 1]];
+        }
+
+        function xy(p) { return Array.isArray(p) ? [Number(p[0]), Number(p[1])] : [Number(p.x), Number(p.y)]; }
+        function mean2(arr) { const n = arr.length; return [arr.reduce((s, q) => s + q[0], 0) / n, arr.reduce((s, q) => s + q[1], 0) / n]; }
+        function norm(v) { return Math.hypot(v[0], v[1]); }
+
+        // (u, v)：u 指向前方、v 指向下方；= medsam_refine.local_axes
+        function localAxes(points) {
+            const pick = keys => keys.filter(k => points[k]).map(k => xy(points[k]));
+            const sup = pick(SUPERIOR), inf = pick(INFERIOR);
+            const ant = pick(['anteriorSuperior', 'anteriorInferior']), post = pick(['posteriorSuperior', 'posteriorInferior']);
+            let u = (ant.length && post.length) ? (() => { const a = mean2(ant), b = mean2(post); return [a[0] - b[0], a[1] - b[1]]; })() : [-1, 0];
+            if (!(sup.length && inf.length) && ant.length && post.length && norm(u) > 1e-6) {
+                const n = norm(u); u = [u[0] / n, u[1] / n];
+                const v = [-u[1], u[0]];
+                return [u, v[1] >= 0 ? v : [-v[0], -v[1]]];
+            }
+            let v = (sup.length && inf.length) ? (() => { const a = mean2(inf), b = mean2(sup); return [a[0] - b[0], a[1] - b[1]]; })() : [0, 1];
+            const nv = norm(v) || 1; v = [v[0] / nv, v[1] / nv];
+            const d = u[0] * v[0] + u[1] * v[1];
+            u = [u[0] - d * v[0], u[1] - d * v[1]];
+            if (norm(u) < 1e-6) u = [-v[1], v[0]];
+            const nu = norm(u);
+            return [[u[0] / nu, u[1] / nu], v];
+        }
+
+        // = medsam_refine.axes_from_mask（輪廓點的凸包與遮罩像素的凸包相同）
+        function axesFromContour(contour, preferV = null, anteriorSign = -1) {
+            if (!contour.length) return [[anteriorSign, 0], [0, 1]];
+            const edges = minAreaRectEdges(contour);
+            const ref = preferV || [0, 1];
+            const score = e => Math.abs(e[0] * ref[0] + e[1] * ref[1]) / (norm(e) || 1);
+            let v = score(edges[1]) > score(edges[0]) ? edges[1] : edges[0];
+            const nv = norm(v) || 1; v = [v[0] / nv, v[1] / nv];
+            if (v[1] < 0) v = [-v[0], -v[1]];
+            let u = [v[1], -v[0]];
+            if (Math.sign(u[0]) !== Math.sign(anteriorSign)) u = [-u[0], -u[1]];
+            return [u, v];
+        }
+
+        function argmax(n, f) { let bi = 0, bv = -Infinity; for (let i = 0; i < n; i++) { const v = f(i); if (v > bv) { bv = v; bi = i; } } return bi; }
+
+        // = medsam_refine.mask_to_points；contour 為外輪廓、area 為區塊面積
+        function maskToPoints(contour, area, axes, minArea = 50) {
+            if (area < minArea || contour.length < 8) return null;
+            const [u, v] = axes;
+            const c = mean2(contour);
+            const a = contour.map(q => (q[0] - c[0]) * u[0] + (q[1] - c[1]) * u[1]);
+            const b = contour.map(q => (q[0] - c[0]) * v[0] + (q[1] - c[1]) * v[1]);
+            const wa = Math.max((Math.max(...a) - Math.min(...a)) / 2, 1e-6);
+            const hb = Math.max((Math.max(...b) - Math.min(...b)) / 2, 1e-6);
+            const an = a.map(x => x / wa), bn = b.map(x => x / hb);
+            const n = contour.length;
+            const idx = {
+                anteriorSuperior: argmax(n, i => an[i] - bn[i]), posteriorSuperior: argmax(n, i => -an[i] - bn[i]),
+                posteriorInferior: argmax(n, i => -an[i] + bn[i]), anteriorInferior: argmax(n, i => an[i] + bn[i]),
+            };
+            if (new Set(Object.values(idx)).size < 4) return null;
+            const out = {};
+            for (const k of Object.keys(idx)) out[k] = contour[idx[k]];
+            const arcs = (i, j) => {
+                const fwd = [], bwd = [];
+                for (let k = 0; k <= ((j - i) % n + n) % n; k++) fwd.push(contour[(i + k) % n]);
+                for (let k = 0; k <= ((i - j) % n + n) % n; k++) bwd.push(contour[((i - k) % n + n) % n]);
+                return [fwd, bwd];
+            };
+            const meanB = s => s.reduce((t, q) => t + (q[0] - c[0]) * v[0] + (q[1] - c[1]) * v[1], 0) / s.length;
+            for (const [name, p, q, side] of [['middleSuperior', 'anteriorSuperior', 'posteriorSuperior', 1],
+                                              ['middleInferior', 'anteriorInferior', 'posteriorInferior', -1]]) {
+                const [f, r] = arcs(idx[p], idx[q]);
+                const arc = side * meanB(r) < side * meanB(f) ? r : f;
+                const A = contour[idx[p]], B = contour[idx[q]];
+                const ch = [B[0] - A[0], B[1] - A[1]];
+                const len2 = (ch[0] * ch[0] + ch[1] * ch[1]) || 1;
+                let bi = 0, bd = Infinity;
+                arc.forEach((s, i) => { const t = ((s[0] - A[0]) * ch[0] + (s[1] - A[1]) * ch[1]) / len2; const d = Math.abs(t - 0.5); if (d < bd) { bd = d; bi = i; } });
+                out[name] = arc[bi];
+            }
+            const res = {};
+            for (const k of POINTS) res[k] = [out[k][0], out[k][1]];
+            return res;
+        }
+
+        // 整條流程。model = { ort, encoder, decoder, side, normalize, context, boxMargin }；gray = 原圖灰階
+        async function segment(model, gray, w, h, box, { hintPoints = null, neighborPoints = null } = {}) {
+            const S = model.side, L = S / 4;
+            const g = boxGeometry(box, model.boxMargin);
+            const m = cropMatrix(g.cx, g.cy, model.context * g.size, S);
+            const patch = warpGray(gray, w, h, m, S);
+            const x = new model.ort.Tensor('float32', preprocess(patch, S, model.normalize), [1, 3, S, S]);
+            const [bx0, by0] = applyAffine(m, box[0], box[1]);
+            const [bx1, by1] = applyAffine(m, box[2], box[3]);
+            const enc = await model.encoder.run({ pixel_values: x });
+            const dec = await model.decoder.run({
+                image_embeddings: enc.image_embeddings,
+                input_boxes: new model.ort.Tensor('float32', Float32Array.of(bx0, by0, bx1, by1), [1, 1, 4]),
+            });
+            const logits = dec.low_res_masks.getData ? await dec.low_res_masks.getData() : dec.low_res_masks.data;
+            const iouData = dec.iou_scores.getData ? await dec.iou_scores.getData() : dec.iou_scores.data;
+            if (logits.length !== L * L) throw new Error(`模型輸出 ${logits.length} 個值，與 meta.json 的 ${S}² 不符，請重新匯出模型`);
+            const iou = Number(iouData[0]);
+            const lc = largestComponent(upsampleMask(logits, L, S), S, S);
+            if (!lc) return { points: null, iou };
+            const contour = traceContour(lc.comp, S, S);
+            const toCrop = pts => Object.fromEntries(Object.entries(pts).map(([k, p]) => { const [px, py] = applyAffine(m, ...xy(p)); return [k, [px, py]]; }));
+            let axes;
+            if (hintPoints && Object.keys(hintPoints).length) axes = localAxes(toCrop(hintPoints));
+            else if (neighborPoints && Object.keys(neighborPoints).length) axes = axesFromContour(contour, localAxes(toCrop(neighborPoints))[1]);
+            else axes = axesFromContour(contour);
+            const pts = maskToPoints(contour, lc.area, axes);
+            if (!pts) return { points: null, iou };
+            const inv = invertAffine(m);
+            const points = {};
+            for (const k of POINTS) { const [ox, oy] = applyAffine(inv, pts[k][0], pts[k][1]); points[k] = { x: ox, y: oy }; }
+            return { points, iou };
+        }
+
+        return { POINTS, cropMatrix, applyAffine, invertAffine, boxGeometry, rgbaToGray, warpGray, preprocess, upsampleMask,
+                 largestComponent, traceContour, convexHull, minAreaRectEdges, localAxes, axesFromContour, maskToPoints, segment };
+    })();
+    if (typeof module !== 'undefined' && module.exports) module.exports = MedsamCore;
+    </script>
     <script>
         // ==================== 配置 ====================
         // 椎體列表：按解剖學由上到下排列
@@ -935,6 +1268,12 @@
         let medsamBusy = false;
         let medsamImage = { img: null, id: null };     // 服務端快取的是哪一張影像
         let medsamSource = { img: null, blob: null };  // 該影像的原始檔案（若有）
+        // 瀏覽器內推論（醫院電腦不能跑 Python 時）：onnxruntime-web＋export_medsam_onnx.py 匯出的模型
+        const MEDSAM_ORT_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.webgpu.min.js';
+        const MEDSAM_IDB = { db: 'medsam-browser-model', store: 'files', key: 'current' };
+        let medsamBackend = null;          // 'server' | 'browser'
+        let medsamWeb = null;              // MedsamCore.segment 的 model＋外部測試集清單
+        let medsamGray = { img: null, gray: null, w: 0, h: 0 };
 
         function medsamBlocked() {
             // 計算中不允許改動椎體，避免結果寫到錯的節
@@ -960,13 +1299,26 @@
             const next = typeof force === 'boolean' ? force : !medsamMode;
             if (next) {
                 if (!originalImage) { alert('請先載入影像'); return false; }
-                try {
-                    const h = await medsamHealth();
-                    setMedsamStatus(h.fine_tuned ? 'MedSAM 已連線：在椎體上拉框' : 'MedSAM 已連線（未微調權重）：在椎體上拉框');
-                } catch (err) {
-                    setMedsamStatus('MedSAM 未連線', true);
-                    alert('連不到 MedSAM 服務。請先在專案資料夾執行：\npython medsam_server.py');
-                    return false;
+                if (medsamWeb) {
+                    medsamBackend = 'browser';
+                    setMedsamStatus(`MedSAM 瀏覽器模式（${medsamWeb.device}）：在椎體上拉框`);
+                } else {
+                    try {
+                        const h = await medsamHealth();
+                        medsamBackend = 'server';
+                        setMedsamStatus(h.fine_tuned ? 'MedSAM 已連線：在椎體上拉框' : 'MedSAM 已連線（未微調權重）：在椎體上拉框');
+                    } catch (err) {
+                        if (await medsamRestoreBrowserModel()) {
+                            medsamBackend = 'browser';
+                            setMedsamStatus(`MedSAM 瀏覽器模式（${medsamWeb.device}）：在椎體上拉框`);
+                        } else {
+                            setMedsamStatus('MedSAM 未就緒', true);
+                            alert('MedSAM 還沒準備好，兩種方式擇一：\n'
+                                + '1. 按「📦 瀏覽器模型」選擇 MedSAM 模型檔案（不需要 Python）\n'
+                                + '2. 在專案資料夾執行：python medsam_server.py');
+                            return false;
+                        }
+                    }
                 }
             } else {
                 setMedsamStatus('');
@@ -1007,6 +1359,7 @@
         }
 
         async function medsamSegment(box, boundaryType, hintPoints, neighborPoints) {
+            if (medsamBackend === 'browser') return medsamSegmentBrowser(box, boundaryType, hintPoints, neighborPoints);
             const img = originalImage;
             const send = id => fetch(MEDSAM_URL + '/segment', {
                 method: 'POST',
@@ -1024,6 +1377,237 @@
             if (img !== originalImage) throw new Error(MEDSAM_STALE);
             return body;
         }
+
+        // ---------- 瀏覽器內推論（不需要 Python） ----------
+        const MEDSAM_CACHE_DAYS = 30;      // 暫存模型（含外部測試集清單）超過這個天數要重新選檔，避免清單過期
+
+        function medsamHex(buf) {
+            return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function medsamSha256(buf) {
+            return medsamHex(await crypto.subtle.digest('SHA-256', buf));
+        }
+
+        function medsamLoadOrt() {
+            if (window.ort) return Promise.resolve(window.ort);
+            return new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = MEDSAM_ORT_URL;
+                s.onload = () => window.ort ? resolve(window.ort) : reject(new Error('onnxruntime-web 載入失敗'));
+                s.onerror = () => reject(new Error('連不到 cdn.jsdelivr.net，無法載入 onnxruntime-web'));
+                document.head.appendChild(s);
+            });
+        }
+
+        async function medsamDetectDevice() {
+            if (typeof navigator !== 'undefined' && navigator.gpu) {
+                try { if (await navigator.gpu.requestAdapter()) return 'webgpu'; } catch (e) { /* 改用 CPU */ }
+            }
+            return 'wasm';
+        }
+
+        // 外部測試集清單必須存在、非空，且與 meta.json 記錄的筆數一致
+        function medsamCheckHoldout(pkg) {
+            const h = pkg.holdout || {}, m = (pkg.meta || {}).holdout;
+            const nFiles = Object.keys(h.files || {}).length, nPixels = Object.keys(h.pixels || {}).length;
+            if (!m) throw new Error('meta.json 沒有外部測試集資訊，請用新版 export_medsam_onnx.py 重新匯出');
+            if (!nFiles || !nPixels) throw new Error('外部測試集清單是空的，不啟用');
+            if (nFiles !== m.files || nPixels !== m.pixels) throw new Error('holdout_hashes.json 與 meta.json 記錄的筆數不同，請重新匯出');
+            return { files: nFiles, pixels: nPixels, created: String(h.created || m.created || '').slice(0, 10) };
+        }
+
+        async function medsamReleaseWeb() {
+            const old = medsamWeb;
+            medsamWeb = null;
+            medsamGray = { img: null, gray: null, w: 0, h: 0 };
+            if (old) {
+                for (const s of [old.encoder, old.decoder]) { try { await s.release?.(); } catch (e) { /* 忽略 */ } }
+            }
+        }
+
+        // pkg = { meta, holdout, encoderName, encoder: ArrayBuffer, decoder: ArrayBuffer, savedAt }
+        async function medsamCreateBrowserModel(pkg, device) {
+            const meta = pkg.meta || {};
+            const pre = meta.preprocess || {};
+            if (!pre.side || !pre.context || pre.box_margin === undefined) throw new Error('meta.json 缺少 preprocess 設定');
+            const hold = medsamCheckHoldout(pkg);
+            const ort = await medsamLoadOrt();
+            ort.env.wasm.numThreads = window.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 4, 8) : 1;
+            const build = async ep => {
+                const opts = { executionProviders: [ep], graphOptimizationLevel: 'all' };
+                const encoder = await ort.InferenceSession.create(new Uint8Array(pkg.encoder), opts);
+                try {
+                    return { encoder, decoder: await ort.InferenceSession.create(new Uint8Array(pkg.decoder), opts) };
+                } catch (err) {
+                    try { await encoder.release?.(); } catch (e) { /* 忽略 */ }
+                    throw err;
+                }
+            };
+            let sessions, used = device;
+            try {
+                sessions = await build(device);
+            } catch (err) {
+                if (device !== 'webgpu') throw err;
+                console.warn('WebGPU 建立失敗，改用 CPU：', err);   // 例如內顯不支援 fp16、遠端桌面
+                sessions = await build('wasm');
+                used = 'wasm';
+            }
+            return {
+                ort, ...sessions, side: pre.side, context: pre.context, boxMargin: pre.box_margin,
+                normalize: meta.normalize || 'imagenet',
+                device: `${used === 'webgpu' ? 'WebGPU' : 'CPU（較慢）'}，${pkg.encoderName}，${pre.side}²；外部測試集 ${hold.files} 張（清單 ${hold.created}）`,
+                holdoutFiles: pkg.holdout.files || {}, holdoutPixels: pkg.holdout.pixels || {},
+            };
+        }
+
+        function medsamIdb() {
+            return new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined') { reject(new Error('沒有 IndexedDB')); return; }
+                const req = indexedDB.open(MEDSAM_IDB.db, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(MEDSAM_IDB.store);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        async function medsamSaveBrowserModel(pkg) {
+            // 存在這台電腦的瀏覽器裡，下次開啟不用再選檔；失敗不影響使用
+            try {
+                const db = await medsamIdb();
+                await new Promise((resolve, reject) => {
+                    const tx = db.transaction(MEDSAM_IDB.store, 'readwrite');
+                    tx.objectStore(MEDSAM_IDB.store).put(pkg, MEDSAM_IDB.key);
+                    tx.oncomplete = resolve;
+                    tx.onerror = () => reject(tx.error);
+                });
+                db.close();
+            } catch (e) {
+                console.warn('無法暫存 MedSAM 模型（下次要重新選檔）：', e);
+            }
+        }
+
+        async function medsamRestoreBrowserModel() {
+            let pkg = null;
+            try {
+                const db = await medsamIdb();
+                pkg = await new Promise((resolve, reject) => {
+                    const r = db.transaction(MEDSAM_IDB.store).objectStore(MEDSAM_IDB.store).get(MEDSAM_IDB.key);
+                    r.onsuccess = () => resolve(r.result);
+                    r.onerror = () => reject(r.error);
+                });
+                db.close();
+            } catch (e) {
+                return false;                       // 沒有 IndexedDB 或沒有暫存：不是錯誤
+            }
+            if (!pkg) return false;
+            const ageDays = (Date.now() - (pkg.savedAt || 0)) / 86400000;
+            if (!(ageDays <= MEDSAM_CACHE_DAYS)) {
+                alert(`暫存的 MedSAM 模型已超過 ${MEDSAM_CACHE_DAYS} 天（外部測試集清單可能過期），請按「📦 瀏覽器模型」重新選檔。`);
+                return false;
+            }
+            try {
+                setMedsamStatus('載入上次的 MedSAM 瀏覽器模型…');
+                await medsamReleaseWeb();
+                medsamWeb = await medsamCreateBrowserModel(pkg, await medsamDetectDevice());
+                return true;
+            } catch (e) {
+                alert(`上次暫存的 MedSAM 模型無法使用：${e && e.message ? e.message : e}`);
+                return false;
+            }
+        }
+
+        async function medsamLoadBrowserModel(fileList) {
+            const files = Array.from(fileList || []);
+            const byName = n => files.find(f => f.name === n);
+            try {
+                setMedsamStatus('讀取 MedSAM 模型…');
+                const device = await medsamDetectDevice();
+                // WebGPU 用 fp16（int8 在 WebGPU 會退回 CPU，反而慢）；只有 CPU 時用 fp32／int8
+                const order = device === 'webgpu' ? ['encoder_fp16.onnx', 'encoder.onnx']
+                                                  : ['encoder.onnx', 'encoder_int8.onnx', 'encoder_fp16.onnx'];
+                const encFile = order.map(byName).find(Boolean);
+                const metaFile = byName('meta.json'), decFile = byName('decoder.onnx'), holdFile = byName('holdout_hashes.json');
+                if (!encFile || !metaFile || !decFile) throw new Error('請選 meta.json、decoder.onnx 與 encoder_fp16.onnx（或 encoder.onnx）');
+                if (!holdFile) throw new Error('缺少 holdout_hashes.json（外部測試集阻擋清單），不啟用');
+                const meta = JSON.parse(await metaFile.text());
+                const holdBuf = await holdFile.arrayBuffer();
+                if (!meta.holdout || await medsamSha256(holdBuf) !== meta.holdout.sha256) {
+                    throw new Error('holdout_hashes.json 與 meta.json 不是同一次匯出，請重新匯出');
+                }
+                const encoder = await encFile.arrayBuffer(), decoder = await decFile.arrayBuffer();
+                // 模型檔必須是 meta.json 記錄的那一次匯出（避免舊檔或另一個尺寸的 encoder 混入）
+                const recorded = Object.values(meta.files || {});
+                for (const [f, buf] of [[encFile, encoder], [decFile, decoder]]) {
+                    const rec = recorded.find(r => r.name === f.name);
+                    if (!rec || await medsamSha256(buf) !== rec.sha256) throw new Error(`${f.name} 與 meta.json 記錄的不同，請重新匯出或重選資料夾`);
+                }
+                const pkg = { meta, holdout: JSON.parse(new TextDecoder().decode(holdBuf)), encoderName: encFile.name,
+                              encoder, decoder, savedAt: Date.now() };
+                await medsamReleaseWeb();
+                medsamWeb = await medsamCreateBrowserModel(pkg, device);
+                await medsamSaveBrowserModel(pkg);          // 建立成功才暫存，壞掉的檔案不會留下來
+                medsamBackend = 'browser';
+                setMedsamStatus(`MedSAM 瀏覽器模型已載入（${medsamWeb.device}）`);
+                if (originalImage && !medsamMode) await toggleMedsamMode(true);
+                return true;
+            } catch (err) {
+                setMedsamStatus('MedSAM 模型載入失敗', true);
+                alert(err && err.message ? err.message : String(err));
+                return false;
+            }
+        }
+
+        // 原圖 RGBA：有原始檔時用 createImageBitmap 不做色彩轉換、不預乘 alpha，
+        // 像素才會和 export_medsam_onnx.rchannel_fingerprint（OpenCV 讀檔）一致
+        async function medsamDecodeRgba(img) {
+            let src = img;
+            let w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+            if (medsamSource.img === img && medsamSource.blob && typeof createImageBitmap === 'function') {
+                try {
+                    src = await createImageBitmap(medsamSource.blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+                    w = src.width; h = src.height;
+                } catch (e) { src = img; }
+            }
+            const c = document.createElement('canvas');
+            c.width = w;
+            c.height = h;
+            const g2 = c.getContext('2d', { willReadFrequently: true });
+            g2.drawImage(src, 0, 0);
+            if (src !== img && src.close) src.close();
+            return { rgba: g2.getImageData(0, 0, w, h).data, w, h };
+        }
+
+        // 原圖灰階（快取）；同時檢查外部測試集：檔案 SHA-256 或 R 通道像素指紋
+        async function medsamEnsureGray(img) {
+            if (medsamGray.img === img && medsamGray.gray) return medsamGray;
+            const fileSha = currentImageMeta && currentImageMeta.sha256;   // await 之前先取
+            const web = medsamWeb;
+            const { rgba, w, h } = await medsamDecodeRgba(img);
+            const prefix = new TextEncoder().encode(`${h}x${w}:`);
+            const buf = new Uint8Array(prefix.length + w * h);
+            buf.set(prefix);
+            for (let i = 0, j = 0; i < w * h; i++, j += 4) buf[prefix.length + i] = rgba[j];
+            const pixel = await medsamSha256(buf);
+            const name = (fileSha && web.holdoutFiles[String(fileSha).toLowerCase()]) || web.holdoutPixels[pixel];
+            if (name) throw new Error(`這張是外部測試集（${name}）的影像，不提供 MedSAM 輔助，以免測試集標準答案偏向模型。請手動標註。`);
+            if (img !== originalImage || web !== medsamWeb) throw new Error(MEDSAM_STALE);
+            medsamGray = { img, gray: MedsamCore.rgbaToGray(rgba, w * h), w, h };
+            return medsamGray;
+        }
+
+        async function medsamSegmentBrowser(box, boundaryType, hintPoints, neighborPoints) {
+            const img = originalImage;
+            const web = medsamWeb;
+            if (!web) throw new Error('瀏覽器模型尚未載入，請按「📦 瀏覽器模型」');
+            const g = await medsamEnsureGray(img);
+            const res = await MedsamCore.segment(web, g.gray, g.w, g.h, box.map(Number),
+                                                 { hintPoints: hintPoints || null, neighborPoints: neighborPoints || null });
+            if (img !== originalImage) throw new Error(MEDSAM_STALE);
+            if (!res.points) throw new Error('框內找不到可用的椎體輪廓，請把框拉得更貼近椎體');
+            return { points: res.points, iou: res.iou, outline: [], boundary: boundaryType || null };
+        }
+
 
         function medsamNeighborHint() {
             // 新增下一節時，以最後一節已標椎體的方向當參考（處理傾斜超過 45° 的椎體）
@@ -1129,9 +1713,22 @@
             const targets = vertebrae.filter(v => !v.boundaryType && v.points.length === 6);   // 存物件參考，不存索引
             if (!targets.length) { alert('沒有完整椎體可以修整。'); return 0; }
             if (!confirm(`用 MedSAM 重新求出 ${targets.length} 節完整椎體的 6 點？\n（T12／S1 等只有單一終板的不會動。不滿意可重新匯入原 JSON 還原。）`)) return 0;
-            try { await medsamHealth(); } catch (err) {
-                alert('連不到 MedSAM 服務。請先在專案資料夾執行：\npython medsam_server.py');
-                return 0;
+            // 與開啟 MedSAM 模式相同的順序：已載入的瀏覽器模型 → 本機服務 → 上次暫存的瀏覽器模型
+            if (medsamWeb) {
+                medsamBackend = 'browser';
+            } else {
+                try {
+                    await medsamHealth();
+                    medsamBackend = 'server';
+                } catch (err) {
+                    if (!(await medsamRestoreBrowserModel())) {
+                        alert('MedSAM 還沒準備好，兩種方式擇一：\n'
+                            + '1. 按「📦 瀏覽器模型」選擇 MedSAM 模型檔案（不需要 Python）\n'
+                            + '2. 在專案資料夾執行：python medsam_server.py');
+                        return 0;
+                    }
+                    medsamBackend = 'browser';
+                }
             }
             medsamBusy = true;
             const failed = [];

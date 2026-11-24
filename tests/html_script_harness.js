@@ -89,11 +89,20 @@ function createElement(tagName = 'div') {
 }
 
 function extractInlineScript(html) {
-  const matches = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];
-  if (matches.length !== 1) {
-    throw new Error(`Expected exactly one inline script, found ${matches.length}`);
-  }
-  return matches[0][1];
+  // 依序串接所有 inline script（略過 <script src=...>），與瀏覽器共用同一個全域範圍的行為相同
+  const matches = [...html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .filter(m => !/\bsrc\s*=/.test(m[1] || ''));
+  if (matches.length === 0) throw new Error('No inline script found');
+  return matches.map(m => m[2]).join('\n;\n');
+}
+
+// 取出指定 id 的 inline script（例如 medsam-core），給純函式測試用
+function extractScriptById(htmlPath, id) {
+  const html = fs.readFileSync(path.resolve(htmlPath), 'utf8');
+  const m = [...html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .find(x => new RegExp(`\\bid\\s*=\\s*["']${id}["']`).test(x[1] || ''));
+  if (!m) throw new Error(`No <script id="${id}"> found`);
+  return m[2];
 }
 
 function loadHtmlScript(htmlPath, overrides = {}) {
@@ -228,4 +237,4 @@ function loadHtmlScript(htmlPath, overrides = {}) {
   };
 }
 
-module.exports = { createElement, extractInlineScript, loadHtmlScript };
+module.exports = { createElement, extractInlineScript, extractScriptById, loadHtmlScript };

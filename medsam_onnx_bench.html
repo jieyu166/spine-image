@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MedSAM 瀏覽器測速</title>
+<!-- onnxruntime-web：WebGPU＋WASM。WASM 執行檔（約 29 MB）會從同一個 CDN 下載 -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.webgpu.min.js"></script>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6778; --line: #d9dee7; --accent: #1f6feb; --ok: #1a7f37; --bad: #cf222e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11151c; --card: #1a2029; --text: #e6e9ef; --muted: #9aa4b5; --line: #2d3542; --accent: #4c8dff; --ok: #3fb950; --bad: #f85149; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  label { display: block; margin: 6px 0; }
+  input[type=file] { max-width: 100%; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 8px 18px; font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .muted { color: var(--muted); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  #log { white-space: pre-wrap; font: 13px/1.5 Consolas, monospace; color: var(--muted); max-height: 220px; overflow: auto; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MedSAM 瀏覽器測速</h1>
+  <p class="lead">量這台電腦在 Chrome 裡跑 MedSAM 一節椎體要幾秒。不上傳任何影像，輸入是隨機數字。</p>
+
+  <section>
+    <h2>這台電腦</h2>
+    <div id="env" class="muted">偵測中…</div>
+  </section>
+
+  <section>
+    <h2>模型檔</h2>
+    <label>encoder（顯示卡建議 encoder_fp16.onnx；只用 CPU 時選 encoder_int8.onnx）<br><input type="file" id="encFile" accept=".onnx"></label>
+    <label>decoder（decoder.onnx）<br><input type="file" id="decFile" accept=".onnx"></label>
+    <div class="row">
+      <label><input type="checkbox" id="useWasm" checked> CPU（WASM）</label>
+      <label><input type="checkbox" id="useGpu" checked> 顯示卡（WebGPU）</label>
+      <label><input type="checkbox" id="useGpuLow"> 內顯（WebGPU 省電模式）</label>
+      <label>重複 <input type="number" id="runs" value="3" min="1" max="20" style="width:4em"> 次</label>
+    </div>
+    <p><button id="run">開始測速</button></p>
+  </section>
+
+  <section>
+    <h2>結果</h2>
+    <div class="table-wrap">
+      <table id="table">
+        <thead><tr><th>模式</th><th>encoder 檔</th><th>載入模型 秒</th><th>encoder 秒</th><th>decoder 秒</th><th>每節 秒</th><th>修整 5 節 秒</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="muted">每節 = encoder＋decoder（中位數，不含第一次暖身）。每節椎體都要跑一次 encoder。</p>
+    <div id="log"></div>
+  </section>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const logLines = [];
+function log(msg) { logLines.push(`[${new Date().toLocaleTimeString('zh-TW', { hour12: false })}] ${msg}`); $('log').textContent = logLines.join('\n'); $('log').scrollTop = 1e9; }
+const median = xs => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+const sec = ms => (ms / 1000).toFixed(2);
+
+async function detectEnv() {
+  const env = {
+    userAgent: navigator.userAgent, cores: navigator.hardwareConcurrency || null, memoryGB: navigator.deviceMemory || null,
+    crossOriginIsolated: !!self.crossOriginIsolated, protocol: location.protocol, webgpu: false, adapter: null, ortVersion: (self.ort && ort.env.versions) ? ort.env.versions : null,
+  };
+  if (navigator.gpu) {
+    try {
+      const a = await navigator.gpu.requestAdapter();
+      if (a) { env.webgpu = true; const i = a.info || {}; env.adapter = [i.vendor, i.architecture, i.description].filter(Boolean).join(' / ') || '（瀏覽器未提供名稱）'; }
+    } catch (e) { env.adapterError = String(e); }
+  }
+  env.wasmThreads = env.crossOriginIsolated ? Math.min(env.cores || 4, 8) : 1;
+  return env;
+}
+
+function renderEnv(env) {
+  const chrome = (env.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || '未知';
+  $('env').innerHTML = `Chrome ${chrome}；CPU 執行緒 ${env.cores ?? '未知'}；記憶體約 ${env.memoryGB ?? '未知'} GB<br>`
+    + `WebGPU：${env.webgpu ? `<span class="ok">可用</span>（${env.adapter}）` : '<span class="bad">不可用</span>'}<br>`
+    + `WASM 執行緒：${env.wasmThreads}${env.crossOriginIsolated ? '' : '（本機檔案開啟時只能單執行緒）'}`;
+  if (!self.ort) $('env').innerHTML += '<br><span class="bad">onnxruntime-web 沒載入：這台電腦可能連不到 cdn.jsdelivr.net</span>';
+}
+
+async function readModel(input, urlParam) {
+  if (input.files && input.files[0]) return new Uint8Array(await input.files[0].arrayBuffer());
+  const url = new URLSearchParams(location.search).get(urlParam);
+  if (url) return new Uint8Array(await (await fetch(url)).arrayBuffer());
+  return null;
+}
+
+async function benchOne(mode, encBytes, decBytes, runs) {
+  const opts = { graphOptimizationLevel: 'all' };
+  if (mode === 'wasm') opts.executionProviders = ['wasm'];
+  else { ort.env.webgpu.powerPreference = mode === 'webgpu-low' ? 'low-power' : 'high-performance'; opts.executionProviders = ['webgpu']; }
+  const t0 = performance.now();
+  const enc = await ort.InferenceSession.create(encBytes, opts);
+  const dec = await ort.InferenceSession.create(decBytes, opts);
+  const loadMs = performance.now() - t0;
+  log(`${mode}：模型載入 ${sec(loadMs)} 秒`);
+  // 輸入尺寸從模型讀（1024 或縮小版的 512）；讀不到就用 1024
+  const meta = (enc.inputMetadata || [])[0];
+  const side = (meta && Array.isArray(meta.shape) && Number.isInteger(meta.shape[2])) ? meta.shape[2] : 1024;
+  log(`${mode}：encoder 輸入 ${side}×${side}`);
+  const pixels = new Float32Array(3 * side * side);
+  for (let i = 0; i < pixels.length; i++) pixels[i] = Math.random() * 4 - 2;
+  const x = new ort.Tensor('float32', pixels, [1, 3, side, side]);
+  let decoderOk = true;
+  const box = new ort.Tensor('float32', new Float32Array([300, 300, 700, 650]), [1, 1, 4]);
+  const encT = [], decT = [];
+  for (let r = 0; r <= runs; r++) {
+    const a = performance.now();
+    const e = await enc.run({ pixel_values: x });
+    await e.image_embeddings.getData?.();
+    const b = performance.now();
+    if (decoderOk) {
+      try {
+        const d = await dec.run({ image_embeddings: e.image_embeddings, input_boxes: box });
+        await d.low_res_masks.getData?.();
+        if (!Number.isFinite(d.iou_scores.data[0])) throw new Error('輸出不是有限數值');
+      } catch (err) {
+        decoderOk = false;
+        log(`${mode}：decoder 與這個 encoder 的尺寸不合，只量 encoder（${err && err.message || err}）`);
+      }
+    }
+    const c = performance.now();
+    if (r > 0) { encT.push(b - a); if (decoderOk) decT.push(c - b); }
+    log(`${mode}：第 ${r} 次 ${r === 0 ? '（暖身）' : ''}encoder ${sec(b - a)} 秒${decoderOk ? `，decoder ${sec(c - b)} 秒` : ''}`);
+  }
+  await enc.release?.(); await dec.release?.();
+  const decMs = decT.length ? median(decT) : 0;
+  const perVert = median(encT) + decMs;
+  return { mode, side, loadS: +sec(loadMs), encoderS: +sec(median(encT)), decoderS: decT.length ? +sec(decMs) : null,
+           perVertebraS: +sec(perVert), refineAll5S: +sec(perVert * 5) };
+}
+
+const LABEL = { wasm: 'CPU（WASM）', webgpu: '顯示卡（WebGPU）', 'webgpu-low': '內顯（WebGPU 省電）' };
+async function runBench() {
+  $('run').disabled = true;
+  const env = window.benchEnv;
+  const result = { env, encoder: null, results: [], errors: [] };
+  try {
+    const encBytes = await readModel($('encFile'), 'encoder');
+    const decBytes = await readModel($('decFile'), 'decoder');
+    if (!encBytes || !decBytes) { alert('請先選 encoder 與 decoder 檔案'); return; }
+    result.encoder = ($('encFile').files[0] || {}).name || new URLSearchParams(location.search).get('encoder');
+    result.encoderMB = +(encBytes.byteLength / 1e6).toFixed(1);
+    ort.env.wasm.numThreads = env.wasmThreads;
+    const modes = [];
+    if ($('useWasm').checked) modes.push('wasm');
+    if ($('useGpu').checked && env.webgpu) modes.push('webgpu');
+    if ($('useGpuLow').checked && env.webgpu) modes.push('webgpu-low');
+    const runs = Math.max(1, +$('runs').value || 3);
+    for (const mode of modes) {
+      try {
+        const r = await benchOne(mode, encBytes, decBytes, runs);
+        result.results.push(r);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${LABEL[mode]}</td><td>${result.encoder}（${r.side}）</td><td>${r.loadS}</td><td>${r.encoderS}</td><td>${r.decoderS ?? '—'}</td><td><b>${r.perVertebraS}</b></td><td>${r.refineAll5S}</td>`;
+        $('table').tBodies[0].appendChild(tr);
+      } catch (e) {
+        result.errors.push({ mode, error: String(e && e.message || e) });
+        log(`${mode}：失敗 ${e && e.message || e}`);
+      }
+    }
+  } finally {
+    $('run').disabled = false;
+    window.benchResult = result;
+    log('完成');
+  }
+  return result;
+}
+
+$('run').addEventListener('click', runBench);
+detectEnv().then(env => { window.benchEnv = env; renderEnv(env); });
+</script>
+</body>
+</html>
