@@ -152,6 +152,7 @@ test('committing a decoded image atomically clears the old case and records imag
       size: 1234,
       lastModified: 42,
       sha256: 'abc123',
+      pixelSha256: null,
     },
     canvasWidth: 800,
     canvasHeight: 1000,
@@ -247,6 +248,8 @@ test('export uses the image stem and includes image identity metadata', async ()
     size: 1234,
     lastModified: 42,
     sha256: 'abc123',
+    pixelSha256: null,
+    pixelHashMethod: null,
   });
   assert.equal(page.evaluate('annotationDirty'), false);
 });
@@ -384,4 +387,164 @@ test('a fully annotated spine exports annotationComplete=true even if finish-ear
   page.evaluate("importAnnotationJson(__annotation, { jsonFilename: 'case.json', silent: true })");
   assert.equal(page.evaluate('finishedEarly'), true, 'flag restored from JSON');
   assert.deepEqual(page.snapshot('getCaseFlags()'), { hasImplant: false, implantNote: '', annotationComplete: true, truncatedReason: null });
+});
+
+// ---- 剪貼簿貼上（image.png）→ 標註 → 另存成病歷號.png：檔案 SHA-256 與記錄的檔名都會變 ----
+function loadAs(page, name, sha, pixel) {
+  page.initialize();
+  page.evaluate(`commitLoadedImage(
+    { width: 800, height: 1000, naturalWidth: 800, naturalHeight: 1000 },
+    { name: ${JSON.stringify(name)}, size: 999, lastModified: 7 }, ${JSON.stringify(sha)}, ${JSON.stringify(pixel)})`);
+}
+
+test('re-saved image: pixel hash match wins over file hash and recorded filename', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'newbytes', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'clipbytes', pixelSha256: 'PIX1' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, 'anything.json')");
+  assert.equal(r.ok, true);
+  assert.equal(r.confirm, undefined);
+  assert.deepEqual(r.warnings, []);
+});
+
+test('re-saved image without pixel hash in JSON: same stem pairs it, file hash difference is only a note', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'newbytes', 'pix1');
+  for (const filename of ['image.png', '90000001.png']) {
+    page.context.__a = matchingAnnotation({ imageInfo: { filename, sha256: 'clipbytes' } });
+    const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')");
+    assert.equal(r.ok, true, filename);
+    assert.deepEqual(r.warnings, [], filename);
+    assert.match(r.notes.join(), /另存/, filename);
+  }
+  assert.equal(page.evaluate("importAnnotationJson(__a, { jsonFilename: '90000001.json' })"), true);
+  assert.deepEqual(page.alerts.filter(a => !a.startsWith('成功匯入')), []);   // 只有成功訊息，沒有拒絕或警告
+  assert.deepEqual(page.confirms, []);
+});
+
+test('pasted image (image.png) pairs with a new JSON by pixel hash', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, 'image.png', 'clip2', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: '90000001.png', sha256: 'other', pixelSha256: 'pix1' } });
+  assert.equal(page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')").ok, true);
+});
+
+test('pasted image with an old JSON (only dimensions comparable) asks before loading', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, 'image.png', 'clip2', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'clip1' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')");
+  assert.equal(r.ok, true);
+  assert.match(r.confirm, /只有尺寸相同/);
+  page.context.confirm = () => false;
+  assert.equal(page.evaluate("importAnnotationJson(__a, { jsonFilename: '90000001.json' })"), false);
+  assert.equal(page.evaluate('vertebrae.length'), 0);
+  page.context.confirm = () => true;
+  assert.equal(page.evaluate("importAnnotationJson(__a, { jsonFilename: '90000001.json' })"), true);
+});
+
+test('pixel mismatch: asks when the stems match, rejects when nothing else matches', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: '90000001.png', sha256: 'a', pixelSha256: 'pix2' } });
+  assert.match(page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')").confirm, /像素內容/);
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000002.json')");
+  assert.equal(r.ok, false, 'recorded filename matches but the JSON stem contradicts it');
+  page.context.__b = matchingAnnotation({ imageInfo: { filename: '90000002.png', sha256: 'a', pixelSha256: 'pix2' } });
+  const rejected = page.snapshot("validateAnnotationForCurrentImage(__b, '90000002.json')");
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.errors.join(), /像素內容不同/);
+});
+
+// 審查指出的情境：同樣的 DICOM 匯出檔名（IM-0001-0001.png）出現在不同病人
+test('same recorded filename but a contradicting JSON stem is not silently accepted', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, 'IM-0001-0001.png', 'patientB', null);
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: 'IM-0001-0001.png', sha256: 'patientA' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')");
+  assert.equal(r.ok, true);
+  assert.match(r.confirm, /互相矛盾/);
+  page.context.confirm = () => false;
+  assert.equal(page.evaluate("importAnnotationJson(__a, { jsonFilename: '90000001.json' })"), false);
+});
+
+test('same stem but a different real recorded filename asks instead of passing', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000002.png', 'b', null);
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: '90000001.png', sha256: 'a' } });
+  assert.match(page.snapshot("validateAnnotationForCurrentImage(__a, '90000002.json')").confirm, /互相矛盾/);
+});
+
+test('JSON stem that differs from a real image name is rejected when no hash matches', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'a' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000002.json')");
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(), /主檔名不符/);
+});
+
+test('missing image-side pixel hash is surfaced as a warning', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', null);
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'a', pixelSha256: 'pix1' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')");
+  assert.equal(r.ok, true);
+  assert.match(r.warnings.join(), /無法計算影像像素雜湊/);
+});
+
+test('constant-pixel canvases (blocked read-back) give no pixel hash', async () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  // 測試環境的 getImageData 一律回傳全 0
+  assert.equal(await page.evaluate('calculatePixelSha256(null, { width: 4, height: 3 })'), null);
+});
+
+test('different real filenames with different file hashes are still rejected', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', null);
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: '90000002.png', sha256: 'a' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__a, '90000002.json')");
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(), /檔名不符/);
+  page.context.__same = matchingAnnotation({ imageInfo: { filename: '90000002.png', sha256: 'b' } });
+  assert.equal(page.snapshot("validateAnnotationForCurrentImage(__same, '90000002.json')").ok, true, 'same bytes = same image even if renamed');
+});
+
+test('dimension mismatch is rejected even when the pixel hash field matches', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { width: 801, pixelSha256: 'pix1' } });
+  assert.equal(page.snapshot("validateAnnotationForCurrentImage(__a, '90000001.json')").ok, false);
+});
+
+test('clipboard-style names are not treated as identities', () => {
+  const page = loadHtmlScript(pagePath);
+  page.initialize();
+  for (const name of ['image.png', 'Image.PNG', 'image (1).png', 'blob', '', null, '圖片.png'])
+    assert.equal(page.evaluate(`isGenericImageName(${JSON.stringify(name)})`), true, String(name));
+  for (const name of ['90000001.png', 'image_L_90000001.png'])
+    assert.equal(page.evaluate(`isGenericImageName(${JSON.stringify(name)})`), false, name);
+});
+
+test('export records the pixel hash and its method', async () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', 'pix1');
+  page.context.__a = matchingAnnotation({ imageInfo: { filename: '90000001.png', sha256: 'b' } });
+  assert.equal(page.evaluate("importAnnotationJson(__a, { jsonFilename: '90000001.json', silent: true })"), true);
+  page.evaluate('annotationDirty = true; exportData()');
+  const info = JSON.parse(await page.downloads.at(-1).blob.text()).imageInfo;
+  assert.equal(info.pixelSha256, 'pix1');
+  assert.equal(info.pixelHashMethod, 'r-channel-v1');
+});
+
+test('a JSON still named image.json (exported right after pasting) is not a filename clue', () => {
+  const page = loadHtmlScript(pagePath);
+  loadAs(page, '90000001.png', 'b', 'pix1');
+  page.context.__new = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'a', pixelSha256: 'pix1' } });
+  assert.equal(page.snapshot("validateAnnotationForCurrentImage(__new, 'image.json')").ok, true);
+  page.context.__old = matchingAnnotation({ imageInfo: { filename: 'image.png', sha256: 'a' } });
+  const r = page.snapshot("validateAnnotationForCurrentImage(__old, 'image.json')");
+  assert.equal(r.ok, true);
+  assert.match(r.confirm, /只有尺寸相同/);
 });

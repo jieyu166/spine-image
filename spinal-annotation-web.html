@@ -1036,7 +1036,51 @@
             }
         }
 
-        function commitLoadedImage(img, file = {}, sha256 = null) {
+        // 像素雜湊：檔案另存、貼上再存檔都會改變檔案位元組（SHA-256），但像素不變。
+        // 定義與外部測試集的像素指紋相同：sha256(`${h}x${w}:` + R 通道)，解碼時不做色彩轉換。
+        const PIXEL_HASH_METHOD = 'r-channel-v1';
+        async function calculatePixelSha256(file, img = null) {
+            if (!crypto?.subtle) return null;
+            let src = null;
+            try {
+                if (file && typeof file.arrayBuffer === 'function' && typeof createImageBitmap === 'function') {
+                    try {
+                        src = await createImageBitmap(file, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+                    } catch (error) { src = null; }
+                }
+                const source = src || img;
+                if (!source) return null;
+                const w = source.naturalWidth || source.width, h = source.naturalHeight || source.height;
+                const c = document.createElement('canvas');
+                c.width = w;
+                c.height = h;
+                const g2 = c.getContext('2d', { willReadFrequently: true });
+                g2.drawImage(source, 0, 0);
+                const rgba = g2.getImageData(0, 0, w, h).data;
+                c.width = c.height = 0;
+                if (!rgba || rgba.length !== w * h * 4) return null;
+                const prefix = new TextEncoder().encode(`${h}x${w}:`);
+                const buf = new Uint8Array(prefix.length + w * h);
+                buf.set(prefix);
+                let lo = 255, hi = 0;
+                for (let i = 0, j = 0; i < w * h; i++, j += 4) {
+                    const r = rgba[j];
+                    buf[prefix.length + i] = r;
+                    if (r < lo) lo = r;
+                    if (r > hi) hi = r;
+                }
+                if (lo === hi) return null;   // 整張同一個值：多半是瀏覽器擋了畫布讀回，雜湊沒有辨識力
+                const digest = await crypto.subtle.digest('SHA-256', buf);
+                return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+            } catch (error) {
+                console.warn('無法計算影像像素雜湊：', error);
+                return null;
+            } finally {
+                if (src && src.close) src.close();
+            }
+        }
+
+        function commitLoadedImage(img, file = {}, sha256 = null, pixelSha256 = null) {
             const width = img.naturalWidth || img.width;
             const height = img.naturalHeight || img.height;
 
@@ -1050,7 +1094,8 @@
                 height,
                 size: Number.isFinite(file.size) ? file.size : null,
                 lastModified: Number.isFinite(file.lastModified) ? file.lastModified : null,
-                sha256: sha256 || null
+                sha256: sha256 || null,
+                pixelSha256: pixelSha256 || null
             };
             canvas.width = width;
             canvas.height = height;
@@ -1070,9 +1115,9 @@
             reader.onload = function(e) {
                 const img = new Image();
                 img.onload = async function() {
-                    const sha256 = await calculateFileSha256(file);
+                    const [sha256, pixelSha256] = await Promise.all([calculateFileSha256(file), calculatePixelSha256(file, img)]);
                     if (requestToken !== imageLoadToken) return;
-                    commitLoadedImage(img, file, sha256);
+                    commitLoadedImage(img, file, sha256, pixelSha256);
 
                     // 自動套用暫存的 SpineFM 資料
                     if (pendingData) {
@@ -2448,31 +2493,74 @@
                 errors.push(`影像尺寸不符：JSON ${info.width}×${info.height}，目前影像 ${imageWidth}×${imageHeight}。`);
             }
 
+            if (errors.length) return { ok: false, errors, warnings };
+
+            // 配對順序：像素雜湊 → 檔案 SHA-256 → 檔名。
+            // 影像常是「剪貼簿貼上（image.png）→ 標註 → 另存成病歷號.png」，另存會重新編碼，
+            // 檔案 SHA-256 與 JSON 記錄的檔名都會變，但像素不變，JSON 與影像的主檔名也相同。
+            const lower = value => (value ? String(value).toLowerCase() : null);
+            const notes = [];
             const currentFilename = currentImageMeta?.filename || null;
-            const jsonImageFilename = info.filename || info.fileName || null;
-            if (jsonImageFilename && currentFilename) {
-                if (String(jsonImageFilename).toLowerCase() !== String(currentFilename).toLowerCase()) {
-                    errors.push(`影像檔名不符：JSON 指向 ${jsonImageFilename}，目前影像為 ${currentFilename}。`);
-                }
+            const recordedFilename = info.filename || info.fileName || null;
+            const jsonHash = lower(info.sha256 || info.sha256Hash);
+            const imageHash = lower(currentImageMeta?.sha256);
+            const jsonPixel = lower(info.pixelSha256);
+            const imagePixel = lower(currentImageMeta?.pixelSha256);
+            const done = (extra = {}) => ({ ok: errors.length === 0, errors, warnings, notes, ...extra });
+
+            if (jsonPixel && imagePixel && jsonPixel === imagePixel) {
+                if (jsonHash && imageHash && jsonHash !== imageHash) notes.push('檔案 SHA-256 不同（影像另存過），像素相同。');
+                return done();
+            }
+            if (jsonHash && imageHash && jsonHash === imageHash) return done();
+
+            const pixelDiffers = !!(jsonPixel && imagePixel);
+            const fileDiffers = !!(jsonHash && imageHash);
+            const jsonStem = filenameStem(jsonFilename, true);
+            const imageStem = filenameStem(currentFilename);
+            const imageNamed = !isGenericImageName(currentFilename);
+            const recordedNamed = !!recordedFilename && !isGenericImageName(recordedFilename);
+            // 兩條檔名線索：JSON 主檔名 vs 影像主檔名、JSON 記錄的檔名 vs 影像檔名。通用檔名（image.png）不算線索。
+            const jsonNamed = !!jsonStem && !isGenericImageName(jsonStem);   // 貼上後匯出的 JSON 預設叫 image.json
+            const stemMatch = jsonNamed && imageNamed && jsonStem === imageStem;
+            const stemConflict = jsonNamed && imageNamed && jsonStem !== imageStem;
+            const nameMatch = recordedNamed && lower(recordedFilename) === lower(currentFilename);
+            const nameConflict = recordedNamed && imageNamed && !nameMatch;
+            const paired = (stemMatch && !nameConflict) || (nameMatch && !stemConflict);
+            const contradictory = (stemMatch && nameConflict) || (nameMatch && stemConflict);
+
+            if (pixelDiffers) {
+                if (paired) return done({ confirm: '檔名對應、尺寸相同，但像素內容和 JSON 記錄的不同（可能是不同的影像處理版本）。\n確定要載入這份標註？' });
+                errors.push('影像像素內容不同，JSON 對應的不是這張影像。');
+                return done();
+            }
+            if (paired) {
+                if (fileDiffers) notes.push('檔案 SHA-256 不同（影像可能另存或重新編碼過），已依檔名與尺寸配對。');
+                else if (!recordedFilename && !jsonHash) warnings.push('舊版 JSON 沒有影像檔名或 SHA-256，已用同主檔名與相同尺寸驗證。');
+                else if (jsonHash && !imageHash) warnings.push('目前環境無法取得影像 SHA-256，僅以檔名與尺寸驗證。');
+                if (jsonPixel && !imagePixel) warnings.push('目前環境無法計算影像像素雜湊，僅以檔名與尺寸配對。');
+                return done();
+            }
+            if (contradictory) {
+                return done({ confirm: `檔名線索互相矛盾：JSON 是 ${jsonFilename || '（無檔名）'}、記錄的影像是 ${recordedFilename}，目前影像是 ${currentFilename}；檔案雜湊也不同。\n確定要載入這份標註？` });
+            }
+            if (nameConflict) {
+                errors.push(`影像檔名不符：JSON 指向 ${recordedFilename}，目前影像為 ${currentFilename}，檔案 SHA-256 也不同。`);
+            } else if (stemConflict) {
+                errors.push(`主檔名不符：JSON 是 ${jsonFilename}，目前影像為 ${currentFilename}，檔案 SHA-256 也不同。`);
+            } else if (!recordedFilename && !jsonHash && !jsonPixel) {
+                errors.push('舊版 JSON 沒有影像檔名；JSON 與影像必須使用完全相同的主檔名。');
             } else {
-                const jsonStem = filenameStem(jsonFilename, true);
-                const imageStem = filenameStem(currentFilename);
-                if (!jsonStem || !imageStem || jsonStem !== imageStem) {
-                    errors.push('舊版 JSON 沒有影像檔名；JSON 與影像必須使用完全相同的主檔名。');
-                } else {
-                    warnings.push('舊版 JSON 沒有影像檔名或 SHA-256，已用同主檔名與相同尺寸驗證。');
-                }
+                // 例如貼上的影像（image.png）配舊 JSON：只剩尺寸可比，交給使用者決定
+                return done({ confirm: '無法確認 JSON 與目前影像是同一張：只有尺寸相同（貼上的影像沒有檔名，檔案 SHA-256 不同或沒有記錄）。\n確定要載入這份標註？' });
             }
+            return done();
+        }
 
-            const jsonHash = info.sha256 || info.sha256Hash || null;
-            const imageHash = currentImageMeta?.sha256 || null;
-            if (jsonHash && imageHash && String(jsonHash).toLowerCase() !== String(imageHash).toLowerCase()) {
-                errors.push('影像 SHA-256 不符，JSON 與目前影像不是同一檔案。');
-            } else if (jsonHash && !imageHash) {
-                warnings.push('目前環境無法取得影像 SHA-256，僅以檔名與尺寸驗證。');
-            }
-
-            return { ok: errors.length === 0, errors, warnings };
+        // 剪貼簿貼上的影像沒有真正的檔名（Chrome 給 image.png），不能拿來配對
+        function isGenericImageName(filename) {
+            const stem = filenameStem(filename);
+            return !stem || /^(image|blob|clipboard|untitled|pasted|pasted graphic|screenshot|screen shot|download|downloads|圖片|未命名|擷取|螢幕擷取畫面|剪取)([\s_-]*\(?\d+\)?)?$/i.test(stem);
         }
 
         function importAnnotationJson(data, options = {}) {
@@ -2493,6 +2581,8 @@
                     alert('拒絕載入標註：\n' + validation.errors.join('\n'));
                     return false;
                 }
+                if (validation.confirm && !confirm(validation.confirm)) return false;
+                if (validation.notes && validation.notes.length) console.info('標註配對：' + validation.notes.join(' '));
                 if (validation.warnings.length > 0 && !options.silent) {
                     alert(validation.warnings.join('\n'));
                 }
@@ -2512,7 +2602,10 @@
             // 如果 JSON 帶有原圖 base64，自動載入
             if (data.originalImageBase64) {
                 const img = new Image();
-                img.onload = function() {
+                const requestToken = ++imageLoadToken;
+                img.onload = async function() {
+                    const pixelSha256 = await calculatePixelSha256(null, img);
+                    if (requestToken !== imageLoadToken) return;
                     resetCaseState();
                     originalImage = img;
                     canvas.width = Math.min(img.width, 1200);
@@ -2525,7 +2618,8 @@
                         height: img.naturalHeight || img.height,
                         size: null,
                         lastModified: null,
-                        sha256: data.imageInfo?.sha256 || null
+                        sha256: null,          // 沒有原始檔位元組，不照抄 JSON 宣稱的值
+                        pixelSha256
                     };
                     _finishImport(srcVertebrae, data, options);
                 };
@@ -2732,9 +2826,9 @@
             reader.onload = function(e) {
                 const img = new Image();
                 img.onload = async function() {
-                    const sha256 = await calculateFileSha256(file);
+                    const [sha256, pixelSha256] = await Promise.all([calculateFileSha256(file), calculatePixelSha256(file, img)]);
                     if (requestToken !== imageLoadToken) return;
-                    commitLoadedImage(img, file, sha256);
+                    commitLoadedImage(img, file, sha256, pixelSha256);
                     if (callback) callback();
                 };
                 img.onerror = function() {
@@ -3064,14 +3158,14 @@
                 alert(`無法載入 viewer 傳來的影像：${error.message}`);
                 return false;
             }
-            const sha256 = await calculateFileSha256(imageFile);
+            const [sha256, pixelSha256] = await Promise.all([calculateFileSha256(imageFile), calculatePixelSha256(imageFile, img)]);
             if (requestToken !== imageLoadToken) return false;
             const fileMeta = {
                 name: imageFile.name || data.imageName || null,
                 size: imageFile.size,
                 lastModified: imageFile.lastModified,
             };
-            commitLoadedImage(img, fileMeta, sha256);
+            commitLoadedImage(img, fileMeta, sha256, pixelSha256);
             viewerLink = {
                 source: event.source || window.opener || null,
                 sourceImagePath: data.sourceImagePath || fileMeta.name,
@@ -3866,7 +3960,9 @@
                     height: currentImageMeta?.height || originalImage.naturalHeight || originalImage.height,
                     size: currentImageMeta?.size ?? null,
                     lastModified: currentImageMeta?.lastModified ?? null,
-                    sha256: currentImageMeta?.sha256 || null
+                    sha256: currentImageMeta?.sha256 || null,
+                    pixelSha256: currentImageMeta?.pixelSha256 || null,
+                    pixelHashMethod: currentImageMeta?.pixelSha256 ? PIXEL_HASH_METHOD : null
                 } : null,
                 vertebrae: ordered.map(v => {
                     const entry = {

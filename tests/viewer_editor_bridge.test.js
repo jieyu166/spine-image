@@ -10,6 +10,7 @@ const { loadHtmlScript } = require('./html_script_harness');
 const viewerPath = path.join(__dirname, '..', 'annotation-viewer.html');
 const editorPath = path.join(__dirname, '..', 'spinal-annotation-web.html');
 
+
 function fakeWindow() {
   const messages = [];
   return {
@@ -189,6 +190,8 @@ test('editor loads the viewer case with identity checks and returns the export t
   assert.equal(await page.evaluate('handleViewerMessage({ data: __msg, source: __src })'), true);
   assert.deepEqual(page.snapshot('currentImageMeta'), {
     filename: 'case.png', width: 800, height: 1000, size: file.size, lastModified: 42, sha256: sha,
+    pixelSha256: null,   // 測試環境的 canvas 讀回全 0，常數影像不給像素雜湊
+
   });
   assert.equal(page.evaluate('vertebrae.length'), 1);
   assert.equal(page.evaluate('viewerLink.sourceJsonPath'), 'Images/202609/case.json');
@@ -205,17 +208,30 @@ test('editor loads the viewer case with identity checks and returns the export t
   assert.equal(JSON.parse(back.jsonText).imageInfo.sha256, sha);
 });
 
-test('editor rejects a JSON whose image hash does not match the sent image', async () => {
+test('editor accepts a re-saved image (file hash differs) when the JSON and image stems match', async () => {
   const { page, viewerWindow } = loadEditor();
   const { file } = pngFile();
   page.context.__msg = {
     type: 'spine-viewer-case', imageFile: file, imageName: 'case.png',
-    jsonText: JSON.stringify(annotation({ imageInfo: { sha256: 'deadbeef' } })), jsonName: 'case.json',
+    jsonText: JSON.stringify(annotation({ imageInfo: { filename: 'image.png', sha256: 'deadbeef' } })), jsonName: 'case.json',
     sourceImagePath: 'Images/case.png',
   };
   page.context.__src = viewerWindow;
+  assert.equal(await page.evaluate('handleViewerMessage({ data: __msg, source: __src })'), true);
+  assert.equal(page.evaluate('vertebrae.length'), 1);
+});
+
+test('editor rejects a JSON whose pixels and filename do not match the sent image', async () => {
+  const { page, viewerWindow } = loadEditor();
+  const { file } = pngFile();
+  page.context.__msg = {
+    type: 'spine-viewer-case', imageFile: file, imageName: 'case.png',
+    jsonText: JSON.stringify(annotation({ imageInfo: { filename: 'other.png', sha256: 'deadbeef', pixelSha256: 'beefdead' } })),
+    jsonName: 'other.json', sourceImagePath: 'Images/case.png',
+  };
+  page.context.__src = viewerWindow;
   assert.equal(await page.evaluate('handleViewerMessage({ data: __msg, source: __src })'), false);
-  assert.match(page.alerts.at(-1), /SHA-256 不符/);
+  assert.match(page.alerts.at(-1), /檔名不符/);
   assert.equal(page.evaluate('vertebrae.length'), 0);
   assert.match(page.evaluate("document.getElementById('taskText').textContent"), /標註未載入/);
 });
