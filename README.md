@@ -213,6 +213,10 @@ pip install albumentations==1.3.1   # 1.4+ 在 Python 3.14 有安裝問題
 #    存回原檔：首次按「📂 授權 Images 資料夾」（Chrome/Edge，只需一次），之後「💾 存回原檔」或 Ctrl+S
 #    直接覆蓋原本讀取的 JSON，舊版自動備份到 Images/_json_backups/*.bak（訓練與 viewer 都不會讀到）。
 #    覆蓋會改變檔案 SHA-256，之後需重建 training allowlist。
+#    影像與 JSON 配對：尺寸必須相同；像素雜湊（imageInfo.pixelSha256）或檔案 SHA-256 相同就通過，
+#    否則看「JSON 主檔名＝影像主檔名」或「記錄的檔名＝影像檔名」。剪貼簿貼上的 image.png 不算檔名，
+#    所以「貼上→標註→另存成病歷號.png」的影像配病歷號.json 可以直接載入；線索互相矛盾或只剩尺寸可比時會先詢問。
+#    驗證：node tests/chrome_identity_smoke.mjs <chrome.exe> <暫存資料夾> <a.png> <a.json> [...]
 # 1b. 檢查並修正：annotation-viewer.html 看到標錯的案例，按「✏️ 送到標註工具修正」（批次模式按 E），
 #    會在同一個標註工具分頁開啟該影像與 JSON；修正後存回原檔或匯出，viewer 立即重畫修正版。
 #    自動化測試：node --test tests/viewer_editor_bridge.test.js tests/save_to_original.test.js
@@ -298,7 +302,7 @@ best_vertebra_model_fold3.pth      ← ensemble 成員 (val 0.6230)
 best_vertebra_model.pth.ensemble   ← sidecar 純文字（內容一行：best_vertebra_model_fold3.pth）
 ```
 
-**Colab 步驟**：上傳上面 3 檔到 `MyDrive/Spine/weights/` → 開 [notebook](spine_inference_colab.ipynb) → 切 T4 GPU → 依序執行 cell。載入時務必看到 `Ensemble 啟用：主模型 + 1 個成員` 才表示 fold3 有載到。詳見 [HANDOFF_2026-06-11.md](HANDOFF_2026-06-11.md)。
+**Colab 步驟**：上傳上面 3 檔到 `MyDrive/Spine/weights/` → 開 [notebook](spine_inference_colab.ipynb) → 切 T4 GPU → 依序執行 cell。載入時務必看到 `Ensemble 啟用：主模型 + 1 個成員` 才表示 fold3 有載到。詳見 [HANDOFF_2026-06-11.md](docs/handoff/HANDOFF_2026-06-11.md)。
 
 ---
 
@@ -353,14 +357,17 @@ Spine/
 │   ├── Dockerfile / docker-compose.yml   # Synology NAS 部署
 │   └── spine_inference_colab.ipynb       # Colab 推論 (Gradio)
 │
-├── 交班文件
-│   ├── HANDOFF_2026-06-11.md         # 最新（推論優化鏈 + ensemble + Colab 步驟）
-│   ├── HANDOFF_2026-06-06.md         # V3.4 上線 + aspect-fix
-│   └── HANDOFF_2026-06-05.md
+├── docs/
+│   ├── handoff/                     # 交班文件（HANDOFF_YYYY-MM-DD.md，最新為 2026-11-24：MedSAM 瀏覽器版 + 醫院測試步驟）
+│   ├── USAGE_GUIDE.md               # 操作說明
+│   ├── TECHNICAL_REFERENCE.md       # 參數與技術細節
+│   ├── SYNOLOGY_DEPLOY.md           # NAS 部署
+│   └── ANNOTATION_CORRECTION_NOTES.md
 │
-└── 資料夾
+└── 資料夾（不進 git）
     ├── Images/                      # 訓練影像 + 標註 JSON
-    └── endplate_training_data/      # 訓練數據 split
+    ├── endplate_training_data/      # 訓練數據 split
+    └── comparison_ensemble/         # 目前生產配置的 QA 疊圖（較舊版本已封存到 OneDrive 外）
 ```
 
 ---
@@ -418,4 +425,4 @@ Spine/
 | V2.0 | 椎體 4 角點 + 回歸分支 | — |
 | V1.0 | 終板標註 + U-Net 分割 | — |
 
-完整逐步紀錄與每個技巧的「為什麼」，見 [HANDOFF_2026-06-11.md](HANDOFF_2026-06-11.md)。
+完整逐步紀錄與每個技巧的「為什麼」，見 [HANDOFF_2026-06-11.md](docs/handoff/HANDOFF_2026-06-11.md)。
